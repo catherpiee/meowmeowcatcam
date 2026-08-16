@@ -30,6 +30,7 @@ Press q or ESC to quit.
 
 import math
 import random
+import threading
 import time
 from pathlib import Path
 
@@ -418,10 +419,137 @@ def draw_landmarks(frame, hand_result):
             cv2.circle(frame, (x, y), 4, (60, 140, 255), -1)
 
 
-def fit_to_height(img, height):
-    h, w = img.shape[:2]
-    scale = height / h
-    return cv2.resize(img, (int(w * scale), height))
+# size a window to its own content's aspect ratio, maximized within a given
+# box, instead of forcing content into a fixed-aspect box (which either
+# crops part of the picture off or wastes space with letterbox bars).
+def fit_dims(img_w, img_h, box_w, box_h):
+    scale = min(box_w / img_w, box_h / img_h)
+    return max(1, int(img_w * scale)), max(1, int(img_h * scale))
+
+
+def get_screen_size():
+    """Query the actual display resolution (via a throwaway Tk root) so
+    windows can be sized/placed to fill the screen instead of guessing."""
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        w, h = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.destroy()
+        return w, h
+    except Exception:
+        return 1440, 900
+
+
+# The web version stays smooth under load because the <video> tag renders on
+# its own, independent of the JS detection loop - the loop just reads
+# whatever frame happens to be current. cv2.imshow has no such decoupling:
+# if capture/detect/draw/show all happen in one loop, display fps is capped
+# by mediapipe's (CPU-bound, here) inference time. So capture and detection
+# run in their own free-running threads, and the display loop only ever
+# grabs the latest frame + latest detection result - display fps is then
+# bounded by the camera, not by mediapipe.
+class SharedFrame:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.frame = None
+
+    def set(self, frame):
+        with self.lock:
+            self.frame = frame
+
+    def get(self):
+        with self.lock:
+            return self.frame
+
+
+class SharedDetection:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.hand_result = None
+        self.gesture = "default"
+
+    def set(self, hand_result, gesture):
+        with self.lock:
+            self.hand_result = hand_result
+            self.gesture = gesture
+
+    def get(self):
+        with self.lock:
+            return self.hand_result, self.gesture
+
+
+def capture_loop(cap, shared_frame, stop_event):
+    while not stop_event.is_set():
+        ok, frame = cap.read()
+        if not ok:
+            stop_event.set()
+            break
+        shared_frame.set(cv2.flip(frame, 1))  # mirror, like a selfie cam
+
+
+def detection_loop(
+    hand_landmarker,
+    face_landmarker,
+    shared_frame,
+    shared_detection,
+    state,
+    memes,
+    flow_log,
+    stop_event,
+):
+    prev_flow_gray = None
+    current_gesture = "default"
+    candidate_gesture = "default"
+    candidate_streak = 0
+    last_non_default_at = time.time() * 1000
+    start_time = time.time()
+
+    while not stop_event.is_set():
+        frame = shared_frame.get()
+        if frame is None:
+            time.sleep(0.005)
+            continue
+
+        magnitude, coherence, prev_flow_gray = frame_flow_signal(frame, prev_flow_gray)
+        state.update_flow(magnitude, coherence)
+        flow_log.write(
+            f"{time.time() * 1000:.0f},{magnitude:.4f},{coherence:.4f},"
+            f"{state.last_flow_score_debug:.4f},{state.last_flow_fraction_debug:.4f},"
+            f"{state.last_flow_peak_debug:.4f},{current_gesture}\n"
+        )
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = Image(image_format=ImageFormat.SRGB, data=rgb)
+        ts_ms = int((time.time() - start_time) * 1000)
+
+        hand_result = hand_landmarker.detect_for_video(mp_image, ts_ms)
+        face_result = face_landmarker.detect_for_video(mp_image, ts_ms)
+        state.update_face(face_result)
+
+        gesture = state.decide(hand_result)
+
+        now = time.time() * 1000
+        if gesture == candidate_gesture:
+            candidate_streak += 1
+        else:
+            candidate_gesture = gesture
+            candidate_streak = 1
+
+        if candidate_streak >= STABLE_FRAMES_REQUIRED and gesture != current_gesture:
+            current_gesture = gesture
+            if gesture not in VIDEO_GESTURES:
+                memes["_current"] = random.choice(memes[gesture])
+            elif gesture == "spinCat":
+                memes["_spin_restart"] = True
+
+        if gesture != "default":
+            last_non_default_at = now
+        elif now - last_non_default_at > DEFAULT_FALLBACK_MS and current_gesture != "default":
+            current_gesture = "default"
+            memes["_current"] = random.choice(memes["default"])
+
+        shared_detection.set(hand_result, current_gesture)
 
 
 def main():
@@ -442,6 +570,8 @@ def main():
     )
 
     memes = load_memes()
+    memes["_current"] = random.choice(memes["default"])
+    memes["_spin_restart"] = False
 
     # every frame's flow numbers get logged here, timestamped - so we can
     # look at exactly what a real, full-effort spin looked like afterward
@@ -464,85 +594,102 @@ def main():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise RuntimeError("Could not open webcam (index 0)")
+    # ask for a proper resolution and fps - an unconfigured VideoCapture
+    # often defaults to a low-res mode (this was the actual "quality" gap
+    # vs. the web version, which requests 640x480 but through getUserMedia's
+    # own negotiation that tends to pick a much better encode than
+    # AVFoundation's default). MJPG gives the camera more bandwidth
+    # headroom to hit both the resolution and the fps target.
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # always grab the newest frame, not a queued stale one
 
-    cv2.namedWindow("Camera")
-    cv2.namedWindow("Meme")
-    cv2.moveWindow("Camera", 40, 80)
-    cv2.moveWindow("Meme", 720, 80)
+    CAM_WINDOW, MEME_WINDOW = "Camera", "Meme"
+    screen_w, screen_h = get_screen_size()
+    TOP_MARGIN = 60  # menu bar + window title bar, so windows don't get placed under them
+    avail_w, avail_h = screen_w // 2, screen_h - TOP_MARGIN
 
     state = GestureState()
-    current_gesture = "default"
-    candidate_gesture = "default"
-    candidate_streak = 0
-    last_non_default_at = time.time() * 1000
-    current_meme = random.choice(memes["default"])
-    prev_flow_gray = None
+    shared_frame = SharedFrame()
+    shared_detection = SharedDetection()
+    stop_event = threading.Event()
 
-    start_time = time.time()
+    cap_thread = threading.Thread(target=capture_loop, args=(cap, shared_frame, stop_event), daemon=True)
+    det_thread = threading.Thread(
+        target=detection_loop,
+        args=(
+            hand_landmarker,
+            face_landmarker,
+            shared_frame,
+            shared_detection,
+            state,
+            memes,
+            flow_log,
+            stop_event,
+        ),
+        daemon=True,
+    )
+    cap_thread.start()
+    det_thread.start()
+
     try:
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            frame = cv2.flip(frame, 1)  # mirror, like a selfie cam
+        # wait for the first camera frame so we know its native aspect ratio
+        # before sizing the window (and so the window doesn't flash empty)
+        while shared_frame.get() is None and not stop_event.is_set():
+            time.sleep(0.01)
 
-            magnitude, coherence, prev_flow_gray = frame_flow_signal(frame, prev_flow_gray)
-            state.update_flow(magnitude, coherence)
-            flow_log.write(
-                f"{time.time() * 1000:.0f},{magnitude:.4f},{coherence:.4f},"
-                f"{state.last_flow_score_debug:.4f},{state.last_flow_fraction_debug:.4f},"
-                f"{state.last_flow_peak_debug:.4f},{current_gesture}\n"
-            )
+        first_frame = shared_frame.get()
+        cam_w, cam_h = fit_dims(first_frame.shape[1], first_frame.shape[0], avail_w, avail_h)
 
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = Image(image_format=ImageFormat.SRGB, data=rgb)
-            ts_ms = int((time.time() - start_time) * 1000)
+        cv2.namedWindow(CAM_WINDOW, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(CAM_WINDOW, cam_w, cam_h)
+        cv2.moveWindow(CAM_WINDOW, 0, TOP_MARGIN)  # left edge pinned to screen's left edge
 
-            hand_result = hand_landmarker.detect_for_video(mp_image, ts_ms)
-            face_result = face_landmarker.detect_for_video(mp_image, ts_ms)
-            state.update_face(face_result)
+        cv2.namedWindow(MEME_WINDOW, cv2.WINDOW_NORMAL)
 
-            gesture = state.decide(hand_result)
+        while not stop_event.is_set():
+            frame = shared_frame.get()
+            if frame is None:
+                continue
+            frame = frame.copy()
 
-            now = time.time() * 1000
-            if gesture == candidate_gesture:
-                candidate_streak += 1
-            else:
-                candidate_gesture = gesture
-                candidate_streak = 1
-
-            if candidate_streak >= STABLE_FRAMES_REQUIRED and gesture != current_gesture:
-                current_gesture = gesture
-                if gesture not in VIDEO_GESTURES:
-                    current_meme = random.choice(memes[gesture])
-                elif gesture == "spinCat":
-                    spin_video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-            if gesture != "default":
-                last_non_default_at = now
-            elif now - last_non_default_at > DEFAULT_FALLBACK_MS and current_gesture != "default":
-                current_gesture = "default"
-                current_meme = random.choice(memes["default"])
-
-            draw_landmarks(frame, hand_result)
+            hand_result, current_gesture = shared_detection.get()
+            if hand_result is not None:
+                draw_landmarks(frame, hand_result)
             draw_debug_hud(frame, state, current_gesture)
 
             if current_gesture == "spinCat":
+                if memes["_spin_restart"]:
+                    spin_video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    memes["_spin_restart"] = False
                 vframe = next_spin_frame()
-                meme_view = (
-                    fit_to_height(vframe, frame.shape[0])
-                    if vframe is not None
-                    else fit_to_height(current_meme, frame.shape[0])
-                )
+                meme_img = vframe if vframe is not None else memes["_current"]
             else:
-                meme_view = fit_to_height(current_meme, frame.shape[0])
-            cv2.imshow("Camera", frame)
-            cv2.imshow("Meme", meme_view)
+                meme_img = memes["_current"]
 
+            meme_w, meme_h = fit_dims(meme_img.shape[1], meme_img.shape[0], avail_w, avail_h)
+
+            cv2.imshow(CAM_WINDOW, cv2.resize(frame, (cam_w, cam_h)))
+            cv2.imshow(MEME_WINDOW, cv2.resize(meme_img, (meme_w, meme_h)))
+            # macOS/Cocoa backend sometimes ignores resizeWindow if it's not
+            # re-applied after imshow, so pin the size every frame
+            cv2.resizeWindow(MEME_WINDOW, meme_w, meme_h)
+            # anchor the Meme window's RIGHT edge to the screen's right edge,
+            # so as the meme's width changes the window grows/shrinks
+            # leftward (into the screen) instead of rightward (off it)
+            cv2.moveWindow(MEME_WINDOW, screen_w - meme_w, TOP_MARGIN)
+
+            # no delay beyond what's needed to pump the GUI event loop - the
+            # display rate is bounded by the camera thread, not by this wait
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q") or key == 27:
                 break
     finally:
+        stop_event.set()
+        cap_thread.join(timeout=1)
+        det_thread.join(timeout=1)
         cap.release()
         spin_video_cap.release()
         flow_log.close()

@@ -590,7 +590,6 @@ def main():
     cv2.namedWindow("Camera")
     cv2.namedWindow("Meme")
     cv2.moveWindow("Camera", 40, 80)
-    cv2.moveWindow("Meme", 720, 80)
 
     state = GestureState()
     shared_frame = SharedFrame()
@@ -620,6 +619,14 @@ def main():
         while shared_frame.get() is None and not stop_event.is_set():
             time.sleep(0.01)
 
+        # place Meme just to the right of the Camera window's real width
+        # (not a hardcoded x - the cam capture resolution changed, so a
+        # fixed x would overlap it), and prime the window's actual OS rect
+        # so the drag-aware anchoring below has a starting position to read
+        first_frame = shared_frame.get()
+        cv2.imshow("Meme", fit_to_height(memes["_current"], first_frame.shape[0]))
+        cv2.moveWindow("Meme", 40 + first_frame.shape[1] + 40, 80)
+
         while not stop_event.is_set():
             frame = shared_frame.get()
             if frame is None:
@@ -644,8 +651,17 @@ def main():
             else:
                 meme_view = fit_to_height(memes["_current"], frame.shape[0])
 
+            # read the window's CURRENT on-screen position before touching
+            # it - if the user dragged it since last frame, this reflects
+            # that. Then grow leftward from there (keep the right edge
+            # where it is) instead of snapping back to a fixed spot, so
+            # dragging the window still works.
+            meme_x, meme_y, meme_old_w, _ = cv2.getWindowImageRect("Meme")
+            right_edge = meme_x + meme_old_w
+
             cv2.imshow("Camera", frame)
             cv2.imshow("Meme", meme_view)
+            cv2.moveWindow("Meme", right_edge - meme_view.shape[1], meme_y)
 
             # no delay beyond what's needed to pump the GUI event loop - the
             # display rate is bounded by the camera thread, not by this wait

@@ -569,6 +569,10 @@ def main():
     )
 
     memes = load_memes()
+    # widest aspect ratio across every meme image, so the meme window can be
+    # given exactly enough room for the biggest one up front, instead of
+    # discovering mid-session that some meme doesn't fit
+    max_meme_aspect = max(img.shape[1] / img.shape[0] for imgs in memes.values() for img in imgs)
     memes["_current"] = random.choice(memes["default"])
     memes["_spin_restart"] = False
 
@@ -582,6 +586,10 @@ def main():
     spin_video_cap = cv2.VideoCapture(str(MEMES / GESTURE_MEMES["spinCat"][0]))
     if not spin_video_cap.isOpened():
         raise FileNotFoundError(f"missing meme file: {MEMES / GESTURE_MEMES['spinCat'][0]}")
+    spin_w = spin_video_cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    spin_h = spin_video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    if spin_w and spin_h:
+        max_meme_aspect = max(max_meme_aspect, spin_w / spin_h)
 
     def next_spin_frame():
         ok, vframe = spin_video_cap.read()
@@ -643,12 +651,17 @@ def main():
         while shared_frame.get() is None and not stop_event.is_set():
             time.sleep(0.01)
 
-        # cam window is sized ONCE here, to its own aspect ratio maximized
-        # within 2/3 of the screen's width, and never touched again -
-        # nothing the meme does (including its own size) can resize the cam.
+        # reserve just enough width for the biggest meme at full height, plus
+        # a small gap so the two windows don't sit glued together - the cam
+        # gets everything else. Sized once, never touched again: no meme,
+        # however big, ever needs more room than this, so the cam never has
+        # to resize or get overlapped.
+        WINDOW_GAP = 24
+        meme_max_w = int(max_meme_aspect * avail_h)
         first_frame = shared_frame.get()
-        cam_w, cam_h = fit_within(first_frame.shape[1], first_frame.shape[0], screen_w * 2 // 3, avail_h)
-        meme_max_w = screen_w - cam_w  # whatever's left over, meme fits within - never touches the cam
+        cam_w, cam_h = fit_within(
+            first_frame.shape[1], first_frame.shape[0], screen_w - meme_max_w - WINDOW_GAP, avail_h
+        )
 
         cv2.namedWindow(CAM_WINDOW, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(CAM_WINDOW, cam_w, cam_h)

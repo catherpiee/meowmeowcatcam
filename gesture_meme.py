@@ -440,21 +440,24 @@ def get_screen_size():
         return 1440, 900
 
 
-# The Meme window is a plain autosizing cv2 window, so its size follows
-# whatever image we hand it - and since a window keeps its top-left corner
-# fixed, every meme with a different width made the window grow rightward.
-# Rather than chasing that by moving the window every frame (which fights
-# the user dragging it), draw every meme onto a canvas of one constant
-# size: the window is then created once at that size and never resizes at
-# all. The canvas is sized to the widest meme so nothing is ever cropped,
-# and narrower memes are centered in it.
-def paste_centered(img, canvas_w, canvas_h):
-    scale = min(canvas_w / img.shape[1], canvas_h / img.shape[0])
-    w, h = max(1, int(img.shape[1] * scale)), max(1, int(img.shape[0] * scale))
-    canvas = np.zeros((canvas_h, canvas_w, 3), dtype=img.dtype)
-    x, y = (canvas_w - w) // 2, (canvas_h - h) // 2
-    canvas[y:y + h, x:x + w] = cv2.resize(img, (w, h))
-    return canvas
+# Memes are shown at their own aspect ratio - never padded, never stretched,
+# so there are no letterbox bars. The Meme window autosizes to whatever it's
+# given, so it does change width from meme to meme, but the layout reserves
+# a box to its right big enough for the widest one, so that growth always
+# lands in empty reserved space rather than off screen or over the Camera
+# window. Since the window is never moved after placement, dragging works.
+#
+# Normally a meme is drawn at the shared display height. The one exception
+# is the spin video, which is far wider than any still meme - letting it
+# drive the reserved width would shrink the shared height (and so the cam)
+# for the whole session just for the rare moments it plays. Instead the box
+# is sized for the still memes, and anything wider than the box (only the
+# video) is scaled down to the box width.
+def fit_meme(img, height, max_w):
+    w = max(1, int(img.shape[1] * height / img.shape[0]))
+    if w > max_w:
+        w, height = max_w, max(1, int(img.shape[0] * max_w / img.shape[1]))
+    return cv2.resize(img, (w, height))
 
 
 # The web version stays smooth under load because the <video> tag renders on
@@ -586,10 +589,13 @@ def main():
     )
 
     memes = load_memes()
-    # widest aspect ratio of any meme - the fixed canvas is sized to this so
-    # even the widest one fits without being cropped or shrunk. Computed
-    # before the bookkeeping keys below are added, while every value is
-    # still a list of images.
+    # widest aspect ratio among the still memes - the reserved box is sized
+    # to this, so every still meme fits it at full height. The spin video is
+    # deliberately excluded: it's much wider than any of these, and letting
+    # it set the box would cost height (and cam size) all session long for
+    # the rare moments it plays; it gets scaled down to the box instead.
+    # Computed before the bookkeeping keys below are added, while every
+    # value is still a list of images.
     widest_meme_aspect = max(img.shape[1] / img.shape[0] for imgs in memes.values() for img in imgs)
     memes["_current"] = random.choice(memes["default"])
     memes["_spin_restart"] = False
@@ -604,11 +610,6 @@ def main():
     spin_video_cap = cv2.VideoCapture(str(MEMES / GESTURE_MEMES["spinCat"][0]))
     if not spin_video_cap.isOpened():
         raise FileNotFoundError(f"missing meme file: {MEMES / GESTURE_MEMES['spinCat'][0]}")
-    # the spin video is a meme too, so it has to fit the canvas as well
-    spin_w = spin_video_cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    spin_h = spin_video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    if spin_w > 0 and spin_h > 0:
-        widest_meme_aspect = max(widest_meme_aspect, spin_w / spin_h)
 
     def next_spin_frame():
         ok, vframe = spin_video_cap.read()
@@ -661,22 +662,24 @@ def main():
         while shared_frame.get() is None and not stop_event.is_set():
             time.sleep(0.01)
 
-        # Both windows are sized ONCE here and never resize again. Capture
-        # runs at 1280x720 for quality and detection accuracy, but that's
-        # far too wide to show next to a meme on a normal screen, so pick
-        # one shared display height that lets cam + widest meme sit side by
-        # side within the screen. Sizes are constant for the whole session,
-        # so neither window ever grows and both stay freely draggable.
+        # Capture runs at 1280x720 for quality and detection accuracy, but
+        # that's far too wide to show next to a meme on this screen, so
+        # both windows share one display height, picked once so that the
+        # cam and the widest meme fit side by side. The cam window is a
+        # fixed size for the session; the meme window varies in width with
+        # each meme (shown at its own aspect, so no bars), but the space
+        # reserved to its right fits the widest one, so it can never grow
+        # off screen or over the cam.
         first_frame = shared_frame.get()
         cam_aspect = first_frame.shape[1] / first_frame.shape[0]
         screen_w, screen_h = get_screen_size()
         LEFT, GAP, RIGHT, TOP, BOTTOM = 40, 40, 40, 80, 60
-        h = min(
+        display_h = min(
             screen_h - TOP - BOTTOM,
             int((screen_w - LEFT - GAP - RIGHT) / (cam_aspect + widest_meme_aspect)),
         )
-        cam_w, cam_h = int(cam_aspect * h), h
-        canvas_w, canvas_h = int(widest_meme_aspect * h), h
+        cam_w, cam_h = int(cam_aspect * display_h), display_h
+        meme_max_w = int(widest_meme_aspect * display_h)  # reserved box the meme can never exceed
 
         cv2.moveWindow("Camera", LEFT, TOP)
         cv2.moveWindow("Meme", LEFT + cam_w + GAP, TOP)
@@ -701,10 +704,8 @@ def main():
             else:
                 meme_img = memes["_current"]
 
-            # always the same canvas size, so the window never resizes and
-            # therefore never grows in any direction - and since we never
-            # move it, dragging it works normally
-            meme_view = paste_centered(meme_img, canvas_w, canvas_h)
+            # own aspect ratio, no bars; only the spin video hits max_w
+            meme_view = fit_meme(meme_img, display_h, meme_max_w)
 
             cv2.imshow("Camera", cv2.resize(frame, (cam_w, cam_h)))
             cv2.imshow("Meme", meme_view)

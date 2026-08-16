@@ -79,8 +79,32 @@ GESTURE_MEMES = {
 VIDEO_GESTURES = {"spinCat"}
 
 STABLE_FRAMES_REQUIRED = 5
+# Leaving a gesture that's already on screen takes more consecutive frames
+# than entering one does. Finger classification uses a hard angle cutoff,
+# so a finger held near it flickers: in a real recording of simply holding
+# one finger up, oneFingerUp was interrupted 56 times, mostly by fist -
+# interruptions of 2 frames at the median, but 12 of them lasted 5+ frames
+# and so survived the entry threshold. Requiring 12 frames to leave
+# filters 49 of the 56 while still reacting to a real gesture change in
+# under half a second.
+STABLE_FRAMES_TO_LEAVE = 12
 DEFAULT_FALLBACK_MS = 600
 FACE_STALE_MS = 1200
+
+# For a gesture with several memes, one is picked at random each time the
+# gesture is (re)entered. Finger classification uses a hard angle cutoff,
+# so a finger held near that cutoff flickers: a real recording of holding
+# one finger up produced 106 runs of oneFingerUp, bouncing mostly to fist
+# and default, and 38 of them survived debouncing - each re-picking an
+# image, so the meme visibly flapped between profcat and professorcat
+# while the hand never moved.
+#
+# So: re-entering a gesture this soon after leaving it reuses the image it
+# had, and only a genuine gap picks a new one. Replaying that recording
+# through the debounce, this plus STABLE_FRAMES_TO_LEAVE takes the visible
+# image swaps while holding one finger up from ~18 down to ~1 (averaged
+# over 30 random seeds).
+MEME_REROLL_MS = 10000
 
 # how far the head has to turn (yaw, in degrees, from MediaPipe's own head
 # pose estimate - not a hand-rolled distance heuristic) to count as a
@@ -89,11 +113,13 @@ FACE_STALE_MS = 1200
 SIDE_EYE_YAW_DEG = 15.0
 
 # how far the head has to tilt sideways (roll, degrees, same head-pose
-# estimate) for the "huh?" head-tilt look. Set well above SIDE_EYE_YAW_DEG's
-# neighbourhood of casual movement - a deliberate tilt is a big, obvious
-# motion, and a small roll is just how people naturally hold their head.
-# Watch the live "roll" readout while tilting to tune it.
-HUH_ROLL_DEG = 18.0
+# estimate) for the "huh?" head-tilt look.
+#
+# From a real recorded session (flow_debug_log.csv): ordinary head
+# movement kept |roll| under 8.3 for 99% of frames and never went past
+# 15.4, so an 18 threshold could not be reached at all. 12 clears normal
+# movement with margin while staying inside what a deliberate tilt hits.
+HUH_ROLL_DEG = 12.0
 
 # how far open the mouth has to be to count as a scream. Measured as
 # lip-gap over face height (chin to forehead), so it changes neither with
@@ -600,6 +626,16 @@ def detection_loop(
     candidate_streak = 0
     last_non_default_at = time.time() * 1000
     start_time = time.time()
+    # gesture -> (chosen image, when it was last on screen), so a gesture
+    # flickering out and back keeps its image instead of re-rolling
+    meme_choice = {}
+
+    def pick_meme(gesture, now):
+        img, last_seen = meme_choice.get(gesture, (None, None))
+        if img is None or now - last_seen > MEME_REROLL_MS:
+            img = random.choice(memes[gesture])
+        meme_choice[gesture] = (img, now)
+        return img
 
     while not stop_event.is_set():
         frame = shared_frame.get()
@@ -639,13 +675,16 @@ def detection_loop(
             candidate_gesture = gesture
             candidate_streak = 1
 
-        if candidate_streak >= STABLE_FRAMES_REQUIRED and gesture != current_gesture:
+        # sticky once committed: cheap to adopt a gesture from rest, but a
+        # gesture already on screen takes noticeably longer to displace
+        needed = STABLE_FRAMES_REQUIRED if current_gesture == "default" else STABLE_FRAMES_TO_LEAVE
+        if candidate_streak >= needed and gesture != current_gesture:
             current_gesture = gesture
             if gesture in VIDEO_GESTURES:
                 if gesture == "spinCat":
                     memes["_spin_restart"] = True
             elif gesture in memes:
-                memes["_current"] = random.choice(memes[gesture])
+                memes["_current"] = pick_meme(gesture, now)
             # else: gesture is wired up but its artwork isn't in memes/ yet
             # (load_memes said so at startup). Still switch to it so the
             # readout names it - that's what makes the detection tunable
@@ -656,7 +695,7 @@ def detection_loop(
             last_non_default_at = now
         elif now - last_non_default_at > DEFAULT_FALLBACK_MS and current_gesture != "default":
             current_gesture = "default"
-            memes["_current"] = random.choice(memes["default"])
+            memes["_current"] = pick_meme("default", now)
 
         shared_detection.set(hand_result, current_gesture)
 

@@ -8,7 +8,7 @@ Opens two windows, side by side like the OBS/streamer setups:
 Gestures:
   rockstar / shaka  -> memes/cat.jpg
   default (no hand) -> memes/pokercat.jpg
-  one finger up     -> memes/profcat.jpg, memes/professorcat.jpg
+  one finger up     -> memes/professorcat.jpg
   fist / punch      -> memes/punchcat.jpg
   shhh              -> memes/shhcat.jpg
   two fingers together (both hands, tips touching) -> memes/uwucat.jpg, memes/uwucatt.jpg,
@@ -61,7 +61,7 @@ MEMES = ROOT / "memes"
 GESTURE_MEMES = {
     "rockstar": ["cat.jpg"],
     "default": ["pokercat.jpg"],
-    "oneFingerUp": ["profcat.jpg", "professorcat.jpg"],
+    "oneFingerUp": ["professorcat.jpg"],
     "fist": ["punchcat.jpg"],
     "shhh": ["shhcat.jpg"],
     "twoFingersTogether": ["uwucat.jpg", "uwucatt.jpg", "fingers together muehehe .jpg"],

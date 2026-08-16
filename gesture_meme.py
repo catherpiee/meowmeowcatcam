@@ -419,12 +419,20 @@ def draw_landmarks(frame, hand_result):
             cv2.circle(frame, (x, y), 4, (60, 140, 255), -1)
 
 
-# size a window to its own content's aspect ratio, maximized within a given
-# box, instead of forcing content into a fixed-aspect box (which either
-# crops part of the picture off or wastes space with letterbox bars).
-def fit_dims(img_w, img_h, box_w, box_h):
-    scale = min(box_w / img_w, box_h / img_h)
-    return max(1, int(img_w * scale)), max(1, int(img_h * scale))
+# Give the cam and meme windows a fair, uncropped share of the screen: both
+# get the SAME height, and each one's width follows from its own aspect
+# ratio (a wide 16:9 cam naturally needs more width than a near-square meme
+# to reach the same height). A fixed half-and-half column split doesn't work
+# here - the cam is much wider than most meme images, so at equal width the
+# cam would end up much shorter (looking tiny) while the meme fills the
+# column (looking huge). Use the full available height if both fit
+# side-by-side at that height; otherwise shrink both together until they do.
+def split_by_aspect(cam_aspect, meme_aspect, screen_w, avail_h):
+    h = avail_h
+    if (cam_aspect + meme_aspect) * h > screen_w:
+        h = screen_w / (cam_aspect + meme_aspect)
+    h = int(h)
+    return max(1, int(cam_aspect * h)), h, max(1, int(meme_aspect * h)), h
 
 
 def get_screen_size():
@@ -609,7 +617,7 @@ def main():
     CAM_WINDOW, MEME_WINDOW = "Camera", "Meme"
     screen_w, screen_h = get_screen_size()
     TOP_MARGIN = 60  # menu bar + window title bar, so windows don't get placed under them
-    avail_w, avail_h = screen_w // 2, screen_h - TOP_MARGIN
+    avail_h = screen_h - TOP_MARGIN
 
     state = GestureState()
     shared_frame = SharedFrame()
@@ -641,12 +649,10 @@ def main():
             time.sleep(0.01)
 
         first_frame = shared_frame.get()
-        cam_w, cam_h = fit_dims(first_frame.shape[1], first_frame.shape[0], avail_w, avail_h)
+        cam_aspect = first_frame.shape[1] / first_frame.shape[0]
 
         cv2.namedWindow(CAM_WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(CAM_WINDOW, cam_w, cam_h)
         cv2.moveWindow(CAM_WINDOW, 0, TOP_MARGIN)  # left edge pinned to screen's left edge
-
         cv2.namedWindow(MEME_WINDOW, cv2.WINDOW_NORMAL)
 
         while not stop_event.is_set():
@@ -669,12 +675,14 @@ def main():
             else:
                 meme_img = memes["_current"]
 
-            meme_w, meme_h = fit_dims(meme_img.shape[1], meme_img.shape[0], avail_w, avail_h)
+            meme_aspect = meme_img.shape[1] / meme_img.shape[0]
+            cam_w, cam_h, meme_w, meme_h = split_by_aspect(cam_aspect, meme_aspect, screen_w, avail_h)
 
             cv2.imshow(CAM_WINDOW, cv2.resize(frame, (cam_w, cam_h)))
             cv2.imshow(MEME_WINDOW, cv2.resize(meme_img, (meme_w, meme_h)))
             # macOS/Cocoa backend sometimes ignores resizeWindow if it's not
             # re-applied after imshow, so pin the size every frame
+            cv2.resizeWindow(CAM_WINDOW, cam_w, cam_h)
             cv2.resizeWindow(MEME_WINDOW, meme_w, meme_h)
             # anchor the Meme window's RIGHT edge to the screen's right edge,
             # so as the meme's width changes the window grows/shrinks

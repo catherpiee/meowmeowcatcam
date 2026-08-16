@@ -11,8 +11,7 @@ Gestures:
   one finger up     -> memes/professorcat.jpg
   fist / punch      -> memes/punchcat.jpg
   shhh              -> memes/shhcat.jpg
-  two fingers together (both hands, tips touching) -> memes/uwucat.jpg, memes/uwucatt.jpg,
-                                                        memes/fingers together muehehe .jpg
+  two fingers together (both hands, tips touching) -> memes/uwucat.jpg, memes/uwucatt.jpg
   hand covering face -> memes/hand cover face .jpg
   crash-out cat (two hands up beside the face)            -> memes/crashout cat .jpg
   two hands on head                                        -> memes/two hands on head .jpg
@@ -64,7 +63,7 @@ GESTURE_MEMES = {
     "oneFingerUp": ["professorcat.jpg"],
     "fist": ["punchcat.jpg"],
     "shhh": ["shhcat.jpg"],
-    "twoFingersTogether": ["uwucat.jpg", "uwucatt.jpg", "fingers together muehehe .jpg"],
+    "twoFingersTogether": ["uwucat.jpg", "uwucatt.jpg"],
     "handCoverFace": ["hand cover face .jpg"],
     "crashOutCat": ["crashout cat .jpg"],
     "twoHandsOnHead": ["two hands on head .jpg"],

@@ -91,20 +91,24 @@ STABLE_FRAMES_TO_LEAVE = 12
 DEFAULT_FALLBACK_MS = 600
 FACE_STALE_MS = 1200
 
-# For a gesture with several memes, one is picked at random each time the
-# gesture is (re)entered. Finger classification uses a hard angle cutoff,
-# so a finger held near that cutoff flickers: a real recording of holding
-# one finger up produced 106 runs of oneFingerUp, bouncing mostly to fist
-# and default, and 38 of them survived debouncing - each re-picking an
-# image, so the meme visibly flapped between profcat and professorcat
-# while the hand never moved.
+# For a gesture with several memes, which one shows changes only after a
+# genuine rest, not on every re-entry.
 #
-# So: re-entering a gesture this soon after leaving it reuses the image it
-# had, and only a genuine gap picks a new one. Replaying that recording
-# through the debounce, this plus STABLE_FRAMES_TO_LEAVE takes the visible
-# image swaps while holding one finger up from ~18 down to ~1 (averaged
-# over 30 random seeds).
-MEME_REROLL_MS = 10000
+# Finger classification uses a hard angle cutoff, so a finger held near it
+# flickers: a real recording of holding one finger up produced 106 runs of
+# oneFingerUp, bouncing mostly to fist and default, 38 of which survived
+# debouncing. Picking an image on each of those made the meme flap between
+# profcat and professorcat while the hand never moved.
+#
+# Rest is defined as the sustained-default state below (DEFAULT_FALLBACK_MS
+# with no gesture), which a momentary misclassification doesn't reach. So
+# holding a gesture keeps one image no matter how much the classifier
+# wobbles, while lowering your hands and posing again always advances.
+#
+# Advancing in order rather than at random also means every image in a set
+# is reachable: with random picks a 3-image set could go many tries without
+# showing a given one.
+
 
 # how far the head has to turn (yaw, in degrees, from MediaPipe's own head
 # pose estimate - not a hand-rolled distance heuristic) to count as a
@@ -300,6 +304,7 @@ class GestureState:
         self.last_hands_debug = 0
         self.last_pointing_debug = 0
         self.last_tip_gap_debug = 0.0
+        self.last_fingers_debug = ""
         self.flow_history = []  # [(t, magnitude), ...] trailing samples, for the fraction-above trigger
         self.flow_peak_history = []  # [(t, score), ...] longer trailing window, for the readable peak display
         self.last_flow_magnitude_debug = 0.0
@@ -402,6 +407,15 @@ class GestureState:
             self.last_pointing_debug = sum(1 for h in hands if is_pointing(h))
             avg_scale = (hands[0]["handScale"] + hands[1]["handScale"]) / 2
             self.last_tip_gap_debug = dist(hands[0]["indexTip"], hands[1]["indexTip"]) / avg_scale
+            # which fingers each hand reads as extended, as index/middle/
+            # ring/pinky bits - recorded because tip_gap turned out to pass
+            # on every two-hand frame while pointing never reached 2, so the
+            # finger test is what blocks this gesture and this says which
+            # finger is responsible.
+            self.last_fingers_debug = "|".join(
+                "".join(str(int(h[k])) for k in ("indexUp", "middleUp", "ringUp", "pinkyUp"))
+                for h in hands
+            )
 
             if is_pointing(hands[0]) and is_pointing(hands[1]):
                 if self.last_tip_gap_debug < 1.4:
@@ -637,16 +651,20 @@ def detection_loop(
     candidate_streak = 0
     last_non_default_at = time.time() * 1000
     start_time = time.time()
-    # gesture -> (chosen image, when it was last on screen), so a gesture
-    # flickering out and back keeps its image instead of re-rolling
-    meme_choice = {}
+    # gesture -> index of the image currently assigned to it. Advanced only
+    # after a rest, so a gesture flickering out and back keeps its image.
+    meme_index = {}
+    rested = True  # no gesture has been struck yet, so the next one is fresh
 
-    def pick_meme(gesture, now):
-        img, last_seen = meme_choice.get(gesture, (None, None))
-        if img is None or now - last_seen > MEME_REROLL_MS:
-            img = random.choice(memes[gesture])
-        meme_choice[gesture] = (img, now)
-        return img
+    def pick_meme(gesture):
+        options = memes[gesture]
+        i = meme_index.get(gesture)
+        if i is None:
+            i = random.randrange(len(options))  # don't always open on the same one
+        elif rested:
+            i = (i + 1) % len(options)
+        meme_index[gesture] = i
+        return options[i]
 
     while not stop_event.is_set():
         frame = shared_frame.get()
@@ -677,7 +695,7 @@ def detection_loop(
             f"{state.last_mouth_open_debug:.4f},{state.last_yaw_debug:.2f},"
             f"{state.last_roll_debug:.2f},{int(state.face_seen_this_frame)},"
             f"{state.last_hands_debug},{state.last_pointing_debug},"
-            f"{state.last_tip_gap_debug:.3f},"
+            f"{state.last_tip_gap_debug:.3f},{state.last_fingers_debug},"
             f"{gesture},{current_gesture}\n"
         )
 
@@ -697,18 +715,25 @@ def detection_loop(
                 if gesture == "spinCat":
                     memes["_spin_restart"] = True
             elif gesture in memes:
-                memes["_current"] = pick_meme(gesture, now)
+                memes["_current"] = pick_meme(gesture)
             # else: gesture is wired up but its artwork isn't in memes/ yet
             # (load_memes said so at startup). Still switch to it so the
             # readout names it - that's what makes the detection tunable
             # before the art exists - and leave the meme window showing
             # whatever it had.
+            if gesture != "default":
+                rested = False  # spend the rest on this pose
 
         if gesture != "default":
             last_non_default_at = now
-        elif now - last_non_default_at > DEFAULT_FALLBACK_MS and current_gesture != "default":
-            current_gesture = "default"
-            memes["_current"] = pick_meme("default", now)
+        elif now - last_non_default_at > DEFAULT_FALLBACK_MS:
+            # settled back to no gesture at all - long enough that a
+            # momentary misread can't cause it. That's a real rest, so the
+            # next pose gets to move on to its next image.
+            rested = True
+            if current_gesture != "default":
+                current_gesture = "default"
+                memes["_current"] = pick_meme("default")
 
         shared_detection.set(hand_result, current_gesture)
 
@@ -749,7 +774,7 @@ def main():
     flow_log = open(flow_log_path, "w", buffering=1)  # line-buffered so data survives a hard kill
     flow_log.write(
         "t_ms,magnitude,coherence,score,fraction,peak_2s,"
-        "mouth_open,yaw,roll,face_seen,hands,pointing,tip_gap,"
+        "mouth_open,yaw,roll,face_seen,hands,pointing,tip_gap,fingers,"
         "gesture_raw,gesture_shown\n"
     )
 

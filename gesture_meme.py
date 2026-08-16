@@ -599,8 +599,12 @@ def main():
     # own negotiation that tends to pick a much better encode than
     # AVFoundation's default). MJPG gives the camera more bandwidth
     # headroom to hit both the resolution and the fps target.
+    # 4:3 instead of 16:9 - the cam window sits in a half-screen column,
+    # which is narrower than it is wide, so a 16:9 frame ends up short
+    # (looks small) once scaled to fit that column. 4:3 is much closer to
+    # the column's own aspect ratio, so it scales up bigger.
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     cap.set(cv2.CAP_PROP_FPS, 30)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # always grab the newest frame, not a queued stale one

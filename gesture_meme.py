@@ -419,11 +419,20 @@ def draw_landmarks(frame, hand_result):
             cv2.circle(frame, (x, y), 4, (60, 140, 255), -1)
 
 
-# scale an image's own aspect ratio to the largest size that fits within a
-# box, without cropping or distorting it.
-def fit_within(img_w, img_h, box_w, box_h):
-    scale = min(box_w / img_w, box_h / img_h)
-    return max(1, int(img_w * scale)), max(1, int(img_h * scale))
+# Give the cam and meme windows a fair, uncropped share of the screen: both
+# get the SAME height, and each one's width follows from its own aspect
+# ratio (a wide 16:9 cam naturally needs more width than a near-square meme
+# to reach the same height). A fixed half-and-half column split doesn't work
+# here - the cam is much wider than most meme images, so at equal width the
+# cam would end up much shorter (looking tiny) while the meme fills the
+# column (looking huge). Use the full available height if both fit
+# side-by-side at that height; otherwise shrink both together until they do.
+def split_by_aspect(cam_aspect, meme_aspect, screen_w, avail_h):
+    h = avail_h
+    if (cam_aspect + meme_aspect) * h > screen_w:
+        h = screen_w / (cam_aspect + meme_aspect)
+    h = int(h)
+    return max(1, int(cam_aspect * h)), h, max(1, int(meme_aspect * h)), h
 
 
 def get_screen_size():
@@ -639,21 +648,11 @@ def main():
         while shared_frame.get() is None and not stop_event.is_set():
             time.sleep(0.01)
 
-        # cam window is sized ONCE here, to its own aspect ratio maximized
-        # across the whole screen, and never touched again - the meme window
-        # never affects it.
         first_frame = shared_frame.get()
-        cam_w, cam_h = fit_within(first_frame.shape[1], first_frame.shape[0], screen_w, avail_h)
-        cam_x, cam_y = (screen_w - cam_w) // 2, TOP_MARGIN + (avail_h - cam_h) // 2
+        cam_aspect = first_frame.shape[1] / first_frame.shape[0]
 
         cv2.namedWindow(CAM_WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(CAM_WINDOW, cam_w, cam_h)
-        cv2.moveWindow(CAM_WINDOW, cam_x, cam_y)
-
-        # meme window floats on top of the cam window, centered over it,
-        # capped to a fraction of its size so it reads as an overlay rather
-        # than competing with the cam for screen space.
-        MEME_MAX_W, MEME_MAX_H = int(cam_w * 0.5), int(cam_h * 0.6)
+        cv2.moveWindow(CAM_WINDOW, 0, TOP_MARGIN)  # left edge pinned to screen's left edge
         cv2.namedWindow(MEME_WINDOW, cv2.WINDOW_NORMAL)
 
         while not stop_event.is_set():
@@ -676,17 +675,19 @@ def main():
             else:
                 meme_img = memes["_current"]
 
-            meme_w, meme_h = fit_within(meme_img.shape[1], meme_img.shape[0], MEME_MAX_W, MEME_MAX_H)
+            meme_aspect = meme_img.shape[1] / meme_img.shape[0]
+            cam_w, cam_h, meme_w, meme_h = split_by_aspect(cam_aspect, meme_aspect, screen_w, avail_h)
 
             cv2.imshow(CAM_WINDOW, cv2.resize(frame, (cam_w, cam_h)))
             cv2.imshow(MEME_WINDOW, cv2.resize(meme_img, (meme_w, meme_h)))
             # macOS/Cocoa backend sometimes ignores resizeWindow if it's not
-            # re-applied after imshow, so pin the size every frame. Only the
-            # meme window is resized here - the cam window is fixed above.
+            # re-applied after imshow, so pin the size every frame
+            cv2.resizeWindow(CAM_WINDOW, cam_w, cam_h)
             cv2.resizeWindow(MEME_WINDOW, meme_w, meme_h)
-            # keep it centered over the cam window as its size changes, so
-            # it grows/shrinks symmetrically instead of drifting to an edge
-            cv2.moveWindow(MEME_WINDOW, cam_x + (cam_w - meme_w) // 2, cam_y + (cam_h - meme_h) // 2)
+            # anchor the Meme window's RIGHT edge to the screen's right edge,
+            # so as the meme's width changes the window grows/shrinks
+            # leftward (into the screen) instead of rightward (off it)
+            cv2.moveWindow(MEME_WINDOW, screen_w - meme_w, TOP_MARGIN)
 
             # no delay beyond what's needed to pump the GUI event loop - the
             # display rate is bounded by the camera thread, not by this wait

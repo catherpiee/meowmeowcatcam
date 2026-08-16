@@ -19,11 +19,18 @@ Gestures:
   hand stretched out, palm facing camera (open hand)       -> memes/hand stretched out, palm facing up .jpg
   side eye (head turned to the side)                       -> memes/side eye cat.jpg
   spin cat (spinning fast in your chair)                   -> memes/spin cat.mov (plays as a video)
+  screaming (mouth wide open)                              -> memes/screaming cat.jpg
+  huh? (head tilted sideways)                              -> memes/huh cat.jpg
 
-The Camera window shows a live debug readout (head yaw, and optical-flow
-magnitude/coherence, vs. their trigger thresholds) in the top-left corner so
-side-eye and spin can both be tuned by eye - see SIDE_EYE_YAW_DEG and
-SPIN_FLOW_SCORE_THRESHOLD below.
+A gesture whose meme file isn't in memes/ yet is reported at startup and
+simply never fires, so new gestures can be wired up before their artwork
+exists.
+
+The Camera window shows a compact live readout in the top-left corner -
+each line is "value/threshold" for the signals that drive a gesture (head
+yaw, head roll, mouth openness, and optical-flow magnitude/fraction), so
+they can all be tuned by eye. See SIDE_EYE_YAW_DEG, HUH_ROLL_DEG,
+SCREAM_MOUTH_OPEN and the SPIN_* constants below.
 
 Press q or ESC to quit.
 """
@@ -64,6 +71,8 @@ GESTURE_MEMES = {
     "handStretchedOut": ["hand stretched out, palm facing up .jpg"],
     "sideEyeCat": ["side eye cat.jpg"],
     "spinCat": ["spin cat.mov"],
+    "screamingCat": ["screaming cat.jpg"],
+    "huhCat": ["huh cat.jpg"],
 }
 
 # gestures whose meme is a video, not a still image
@@ -78,6 +87,20 @@ FACE_STALE_MS = 1200
 # side-eye look. Watch the live "yaw" readout in the Camera window while
 # turning your head to find the right value for you.
 SIDE_EYE_YAW_DEG = 15.0
+
+# how far the head has to tilt sideways (roll, degrees, same head-pose
+# estimate) for the "huh?" head-tilt look. Set well above SIDE_EYE_YAW_DEG's
+# neighbourhood of casual movement - a deliberate tilt is a big, obvious
+# motion, and a small roll is just how people naturally hold their head.
+# Watch the live "roll" readout while tilting to tune it.
+HUH_ROLL_DEG = 18.0
+
+# how far open the mouth has to be to count as a scream. Measured as
+# lip-gap over face width, so it doesn't change with distance from the
+# camera: resting mouth sits near 0, talking hovers well under 0.35, and a
+# deliberate wide-open scream goes past it. Watch the live "mouth" readout
+# to tune.
+SCREAM_MOUTH_OPEN = 0.35
 
 # spin detection: full-frame optical flow, downsized for speed. We compute
 # magnitude (how much of the frame moved, on average) each frame; coherence
@@ -157,17 +180,21 @@ def finger_extended(pts, mcp, pip, tip):
     return angle_deg(v1, v2) < 45
 
 
-def yaw_from_transform_matrix(matrix):
-    """Extract the head's left/right turn angle (yaw, degrees) from
-    MediaPipe's facial transformation matrix - its own estimate of head
-    pose, far more robust than trying to infer turn from landmark
-    distances."""
+def yaw_roll_from_transform_matrix(matrix):
+    """Extract the head's left/right turn (yaw) and sideways tilt (roll),
+    in degrees, from MediaPipe's facial transformation matrix - its own
+    estimate of head pose, far more robust than trying to infer either
+    from landmark distances.
+
+    Yaw drives side-eye; roll drives the head-tilt "huh?" look.
+    """
     r = np.asarray(matrix)[:3, :3]
     sy = math.sqrt(r[0, 0] ** 2 + r[1, 0] ** 2)
     if sy < 1e-6:
-        return 0.0
+        return 0.0, 0.0
     yaw = math.atan2(-r[2, 0], sy)
-    return math.degrees(yaw)
+    roll = math.atan2(r[1, 0], r[0, 0])
+    return math.degrees(yaw), math.degrees(roll)
 
 
 def classify_hand(landmarks):
@@ -238,9 +265,11 @@ def frame_flow_signal(frame, prev_small_gray):
 
 class GestureState:
     def __init__(self):
-        self.last_face = None  # (mouth_center, face_width, mouth_open, yaw_deg, t)
+        self.last_face = None  # (mouth_center, face_width, mouth_open, yaw_deg, roll_deg, t)
         self.face_seen_this_frame = False
         self.last_yaw_debug = 0.0
+        self.last_roll_debug = 0.0
+        self.last_mouth_open_debug = 0.0
         self.flow_history = []  # [(t, magnitude), ...] trailing samples, for the fraction-above trigger
         self.flow_peak_history = []  # [(t, score), ...] longer trailing window, for the readable peak display
         self.last_flow_magnitude_debug = 0.0
@@ -288,27 +317,41 @@ class GestureState:
             face_width = dist(right_cheek, left_cheek)
             mouth_open = dist(upper_lip, lower_lip) / face_width
 
-            yaw_deg = 0.0
+            yaw_deg = roll_deg = 0.0
             if face_result.facial_transformation_matrixes:
-                yaw_deg = yaw_from_transform_matrix(face_result.facial_transformation_matrixes[0])
+                yaw_deg, roll_deg = yaw_roll_from_transform_matrix(
+                    face_result.facial_transformation_matrixes[0]
+                )
 
-            self.last_face = (mouth_center, face_width, mouth_open, yaw_deg, now)
+            self.last_face = (mouth_center, face_width, mouth_open, yaw_deg, roll_deg, now)
             self.last_yaw_debug = yaw_deg
+            self.last_roll_debug = roll_deg
+            self.last_mouth_open_debug = mouth_open
         self.face_seen_this_frame = saw_face
 
     def decide(self, hand_result):
         now = time.time() * 1000
-        face_is_fresh = self.last_face is not None and now - self.last_face[4] < FACE_STALE_MS
+        face_is_fresh = self.last_face is not None and now - self.last_face[5] < FACE_STALE_MS
 
         # spinning in the chair beats everything else, hands included.
         if self.is_spinning(now):
             return "spinCat"
 
+        # a wide-open mouth is a deliberate, unmistakable pose, so it wins
+        # over any hand shape - screaming with your hands up is still a
+        # scream. Checked before the no-hands branch for that reason.
+        if face_is_fresh and self.last_face[2] > SCREAM_MOUTH_OPEN:
+            return "screamingCat"
+
         if not hand_result.hand_landmarks:
-            # no hands: side-eye is a face-only pose (head turned, no
-            # particular hand shape needed).
+            # no hands: these are face-only poses (head turned or tilted, no
+            # particular hand shape needed). Side-eye is checked first
+            # because a turned head reads as the stronger intent when both
+            # thresholds happen to trip.
             if face_is_fresh and abs(self.last_face[3]) > SIDE_EYE_YAW_DEG:
                 return "sideEyeCat"
+            if face_is_fresh and abs(self.last_face[4]) > HUH_ROLL_DEG:
+                return "huhCat"
             return "default"
 
         hands = [classify_hand(lm) for lm in hand_result.hand_landmarks]
@@ -321,7 +364,7 @@ class GestureState:
                     return "twoFingersTogether"
 
             if face_is_fresh:
-                mouth_center, face_width, _, _, _ = self.last_face
+                mouth_center, face_width, _, _, _, _ = self.last_face
                 near_face = all(
                     dist(h["palmCenter"], mouth_center) / face_width < 2.2 for h in hands
                 )
@@ -347,7 +390,7 @@ class GestureState:
         # gets swallowed by the "any hand near the face" check.
         if h["indexUp"] and not h["middleUp"] and not h["ringUp"] and not h["pinkyUp"]:
             if face_is_fresh:
-                mouth_center, face_width, _, _, _ = self.last_face
+                mouth_center, face_width, _, _, _, _ = self.last_face
                 d = dist(h["indexTip"], mouth_center) / face_width
                 if d < 0.55:
                     return "shhh"
@@ -358,7 +401,7 @@ class GestureState:
         # lost the face (strong evidence of a real occlusion); tighter if
         # it's still partially tracking through the fingers.
         if face_is_fresh:
-            mouth_center, face_width, _, _, _ = self.last_face
+            mouth_center, face_width, _, _, _, _ = self.last_face
             d = dist(h["palmCenter"], mouth_center) / face_width
             threshold = (
                 HAND_COVER_FACE_DIST_FACE_LOST
@@ -373,14 +416,24 @@ class GestureState:
             return "handStretchedOut"
 
         # hands are up but not making a specific shape - still allow a
-        # strong side-eye read to win over an ambiguous hand pose.
+        # strong side-eye or head-tilt read to win over an ambiguous pose.
         if face_is_fresh and abs(self.last_face[3]) > SIDE_EYE_YAW_DEG:
             return "sideEyeCat"
+        if face_is_fresh and abs(self.last_face[4]) > HUH_ROLL_DEG:
+            return "huhCat"
 
         return "default"
 
 
 def load_memes():
+    """Load every meme image, keyed by gesture.
+
+    A gesture whose image files are all missing is skipped rather than
+    fatal, and simply never fires (decide() falls back to default for it) -
+    that way a gesture can be wired up here before its artwork exists
+    without taking the whole app down. Anything missing is reported on
+    stdout so it doesn't fail silently.
+    """
     cache = {}
     for gesture, files in GESTURE_MEMES.items():
         if gesture in VIDEO_GESTURES:
@@ -390,39 +443,39 @@ def load_memes():
         for name in files:
             img = cv2.imread(str(MEMES / name))
             if img is None:
-                raise FileNotFoundError(f"missing meme file: {MEMES / name}")
+                print(f"[meme missing] {MEMES / name} - '{gesture}' disabled until it's added")
+                continue
             imgs.append(img)
-        cache[gesture] = imgs
+        if imgs:
+            cache[gesture] = imgs
     return cache
 
 
 def draw_debug_hud(frame, state, gesture):
+    # compact: value and its trigger threshold per line, no prose
     lines = [
-        f"gesture: {gesture}",
-        f"yaw: {state.last_yaw_debug:+.1f} deg  (side-eye thr +/-{SIDE_EYE_YAW_DEG:.1f})",
-        f"flow mag: {state.last_flow_magnitude_debug:.2f}  (thr {SPIN_MAG_THRESHOLD:.2f})",
-        f"spin fraction (2.2s window): {state.last_flow_fraction_debug:.2f}  (thr {SPIN_FRACTION_REQUIRED:.2f})",
-        f"peak score (last 2s): {state.last_flow_peak_debug:.2f}  <- read this AFTER you stop spinning",
+        f"{gesture}",
+        f"yaw  {state.last_yaw_debug:+5.1f}/{SIDE_EYE_YAW_DEG:.0f}",
+        f"roll {state.last_roll_debug:+5.1f}/{HUH_ROLL_DEG:.0f}",
+        f"mouth {state.last_mouth_open_debug:.2f}/{SCREAM_MOUTH_OPEN:.2f}",
+        f"flow {state.last_flow_magnitude_debug:.2f}/{SPIN_MAG_THRESHOLD:.2f}",
+        f"spin {state.last_flow_fraction_debug:.2f}/{SPIN_FRACTION_REQUIRED:.2f}"
+        f"  pk {state.last_flow_peak_debug:.2f}",
     ]
 
-    font, scale, thick, outline = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1, 3
-    pad, line_h = 8, 20
-    # measure with the outline thickness, not the fill thickness - the dark
-    # outline is what actually sets how far the text reaches - and allow for
-    # it overhanging the reported advance width on both sides
-    text_w = max(cv2.getTextSize(l, font, scale, outline)[0][0] for l in lines) + outline * 2
+    font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1
+    pad, line_h = 6, 14
 
-    # dark panel behind the text - the readout used to sit directly on the
-    # camera image, where thin green glyphs washed out over bright or busy
-    # areas of the frame
-    panel_w = min(frame.shape[1], pad * 2 + text_w)
-    panel_h = min(frame.shape[0], pad * 2 + line_h * len(lines))
-    panel = frame[0:panel_h, 0:panel_w]
-    cv2.addWeighted(panel, 0.15, np.zeros_like(panel), 0.85, 0, panel)
-
+    # Outline drawn as the same text, same thickness, nudged one pixel in
+    # each direction. Drawing it once at a heavier thickness instead (the
+    # usual trick) doesn't work here: in OpenCV thickness also widens the
+    # per-glyph advance, so a thickness-3 pass ends up to ~30px wider than
+    # the thickness-1 fill on these lines, and the two drift apart into
+    # what looks like a second, offset copy of the readout.
     for i, line in enumerate(lines):
-        y = pad + line_h * i + 14
-        cv2.putText(frame, line, (pad, y), font, scale, (0, 0, 0), 3, cv2.LINE_AA)
+        y = pad + line_h * i + 10
+        for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1), (0, -1), (0, 1), (-1, 0), (1, 0)):
+            cv2.putText(frame, line, (pad + dx, y + dy), font, scale, (0, 0, 0), thick, cv2.LINE_AA)
         cv2.putText(frame, line, (pad, y), font, scale, (0, 255, 120), thick, cv2.LINE_AA)
 
 
@@ -572,11 +625,17 @@ def detection_loop(
             candidate_streak = 1
 
         if candidate_streak >= STABLE_FRAMES_REQUIRED and gesture != current_gesture:
-            current_gesture = gesture
-            if gesture not in VIDEO_GESTURES:
+            if gesture in VIDEO_GESTURES:
+                current_gesture = gesture
+                if gesture == "spinCat":
+                    memes["_spin_restart"] = True
+            elif gesture in memes:
+                current_gesture = gesture
                 memes["_current"] = random.choice(memes[gesture])
-            elif gesture == "spinCat":
-                memes["_spin_restart"] = True
+            else:
+                # gesture is wired up but its artwork isn't in memes/ yet
+                # (load_memes reported it) - stay on whatever is showing
+                gesture = current_gesture
 
         if gesture != "default":
             last_non_default_at = now

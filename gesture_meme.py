@@ -419,10 +419,35 @@ def draw_landmarks(frame, hand_result):
             cv2.circle(frame, (x, y), 4, (60, 140, 255), -1)
 
 
-def fit_to_height(img, height):
-    h, w = img.shape[:2]
-    scale = height / h
-    return cv2.resize(img, (int(w * scale), height))
+def get_screen_size():
+    """Actual display resolution, via a throwaway Tk root, so the two
+    windows can be sized to fit on screen instead of guessing."""
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        w, h = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.destroy()
+        return w, h
+    except Exception:
+        return 1440, 900
+
+
+# The Meme window is a plain autosizing cv2 window, so its size follows
+# whatever image we hand it - and since a window keeps its top-left corner
+# fixed, every meme with a different width made the window grow rightward.
+# Rather than chasing that by moving the window every frame (which fights
+# the user dragging it), draw every meme onto a canvas of one constant
+# size: the window is then created once at that size and never resizes at
+# all. The canvas is sized to the widest meme so nothing is ever cropped,
+# and narrower memes are centered in it.
+def paste_centered(img, canvas_w, canvas_h):
+    scale = min(canvas_w / img.shape[1], canvas_h / img.shape[0])
+    w, h = max(1, int(img.shape[1] * scale)), max(1, int(img.shape[0] * scale))
+    canvas = np.zeros((canvas_h, canvas_w, 3), dtype=img.dtype)
+    x, y = (canvas_w - w) // 2, (canvas_h - h) // 2
+    canvas[y:y + h, x:x + w] = cv2.resize(img, (w, h))
+    return canvas
 
 
 # The web version stays smooth under load because the <video> tag renders on
@@ -554,6 +579,11 @@ def main():
     )
 
     memes = load_memes()
+    # widest aspect ratio of any meme - the fixed canvas is sized to this so
+    # even the widest one fits without being cropped or shrunk. Computed
+    # before the bookkeeping keys below are added, while every value is
+    # still a list of images.
+    widest_meme_aspect = max(img.shape[1] / img.shape[0] for imgs in memes.values() for img in imgs)
     memes["_current"] = random.choice(memes["default"])
     memes["_spin_restart"] = False
 
@@ -567,6 +597,11 @@ def main():
     spin_video_cap = cv2.VideoCapture(str(MEMES / GESTURE_MEMES["spinCat"][0]))
     if not spin_video_cap.isOpened():
         raise FileNotFoundError(f"missing meme file: {MEMES / GESTURE_MEMES['spinCat'][0]}")
+    # the spin video is a meme too, so it has to fit the canvas as well
+    spin_w = spin_video_cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    spin_h = spin_video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    if spin_w > 0 and spin_h > 0:
+        widest_meme_aspect = max(widest_meme_aspect, spin_w / spin_h)
 
     def next_spin_frame():
         ok, vframe = spin_video_cap.read()
@@ -619,13 +654,25 @@ def main():
         while shared_frame.get() is None and not stop_event.is_set():
             time.sleep(0.01)
 
-        # place Meme just to the right of the Camera window's real width
-        # (not a hardcoded x - the cam capture resolution changed, so a
-        # fixed x would overlap it), and prime the window's actual OS rect
-        # so the drag-aware anchoring below has a starting position to read
+        # Both windows are sized ONCE here and never resize again. Capture
+        # runs at 1280x720 for quality and detection accuracy, but that's
+        # far too wide to show next to a meme on a normal screen, so pick
+        # one shared display height that lets cam + widest meme sit side by
+        # side within the screen. Sizes are constant for the whole session,
+        # so neither window ever grows and both stay freely draggable.
         first_frame = shared_frame.get()
-        cv2.imshow("Meme", fit_to_height(memes["_current"], first_frame.shape[0]))
-        cv2.moveWindow("Meme", 40 + first_frame.shape[1] + 40, 80)
+        cam_aspect = first_frame.shape[1] / first_frame.shape[0]
+        screen_w, screen_h = get_screen_size()
+        LEFT, GAP, RIGHT, TOP, BOTTOM = 40, 40, 40, 80, 60
+        h = min(
+            screen_h - TOP - BOTTOM,
+            int((screen_w - LEFT - GAP - RIGHT) / (cam_aspect + widest_meme_aspect)),
+        )
+        cam_w, cam_h = int(cam_aspect * h), h
+        canvas_w, canvas_h = int(widest_meme_aspect * h), h
+
+        cv2.moveWindow("Camera", LEFT, TOP)
+        cv2.moveWindow("Meme", LEFT + cam_w + GAP, TOP)
 
         while not stop_event.is_set():
             frame = shared_frame.get()
@@ -643,25 +690,17 @@ def main():
                     spin_video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     memes["_spin_restart"] = False
                 vframe = next_spin_frame()
-                meme_view = (
-                    fit_to_height(vframe, frame.shape[0])
-                    if vframe is not None
-                    else fit_to_height(memes["_current"], frame.shape[0])
-                )
+                meme_img = vframe if vframe is not None else memes["_current"]
             else:
-                meme_view = fit_to_height(memes["_current"], frame.shape[0])
+                meme_img = memes["_current"]
 
-            # read the window's CURRENT on-screen position before touching
-            # it - if the user dragged it since last frame, this reflects
-            # that. Then grow leftward from there (keep the right edge
-            # where it is) instead of snapping back to a fixed spot, so
-            # dragging the window still works.
-            meme_x, meme_y, meme_old_w, _ = cv2.getWindowImageRect("Meme")
-            right_edge = meme_x + meme_old_w
+            # always the same canvas size, so the window never resizes and
+            # therefore never grows in any direction - and since we never
+            # move it, dragging it works normally
+            meme_view = paste_centered(meme_img, canvas_w, canvas_h)
 
-            cv2.imshow("Camera", frame)
+            cv2.imshow("Camera", cv2.resize(frame, (cam_w, cam_h)))
             cv2.imshow("Meme", meme_view)
-            cv2.moveWindow("Meme", right_edge - meme_view.shape[1], meme_y)
 
             # no delay beyond what's needed to pump the GUI event loop - the
             # display rate is bounded by the camera thread, not by this wait

@@ -648,7 +648,6 @@ def main():
         # nothing the meme does (including its own size) can resize the cam.
         first_frame = shared_frame.get()
         cam_w, cam_h = fit_within(first_frame.shape[1], first_frame.shape[0], screen_w * 2 // 3, avail_h)
-        meme_max_w = screen_w - cam_w  # whatever's left over, meme fits within - never touches the cam
 
         cv2.namedWindow(CAM_WINDOW, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(CAM_WINDOW, cam_w, cam_h)
@@ -675,7 +674,13 @@ def main():
             else:
                 meme_img = memes["_current"]
 
-            meme_w, meme_h = fit_within(meme_img.shape[1], meme_img.shape[0], meme_max_w, avail_h)
+            # always fill the full available height - never shrink it to
+            # stay within the leftover width. If it needs more width than
+            # that, it overlaps the cam window instead (right-anchored, so
+            # it grows leftward over the cam rather than off the screen).
+            meme_aspect = meme_img.shape[1] / meme_img.shape[0]
+            meme_h = avail_h
+            meme_w = max(1, int(meme_aspect * meme_h))
 
             cv2.imshow(CAM_WINDOW, cv2.resize(frame, (cam_w, cam_h)))
             cv2.imshow(MEME_WINDOW, cv2.resize(meme_img, (meme_w, meme_h)))

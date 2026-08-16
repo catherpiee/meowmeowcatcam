@@ -404,10 +404,26 @@ def draw_debug_hud(frame, state, gesture):
         f"spin fraction (2.2s window): {state.last_flow_fraction_debug:.2f}  (thr {SPIN_FRACTION_REQUIRED:.2f})",
         f"peak score (last 2s): {state.last_flow_peak_debug:.2f}  <- read this AFTER you stop spinning",
     ]
+
+    font, scale, thick, outline = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1, 3
+    pad, line_h = 8, 20
+    # measure with the outline thickness, not the fill thickness - the dark
+    # outline is what actually sets how far the text reaches - and allow for
+    # it overhanging the reported advance width on both sides
+    text_w = max(cv2.getTextSize(l, font, scale, outline)[0][0] for l in lines) + outline * 2
+
+    # dark panel behind the text - the readout used to sit directly on the
+    # camera image, where thin green glyphs washed out over bright or busy
+    # areas of the frame
+    panel_w = min(frame.shape[1], pad * 2 + text_w)
+    panel_h = min(frame.shape[0], pad * 2 + line_h * len(lines))
+    panel = frame[0:panel_h, 0:panel_w]
+    cv2.addWeighted(panel, 0.15, np.zeros_like(panel), 0.85, 0, panel)
+
     for i, line in enumerate(lines):
-        y = 24 + i * 22
-        cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 120), 1, cv2.LINE_AA)
+        y = pad + line_h * i + 14
+        cv2.putText(frame, line, (pad, y), font, scale, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, line, (pad, y), font, scale, (0, 255, 120), thick, cv2.LINE_AA)
 
 
 def draw_landmarks(frame, hand_result):
@@ -696,7 +712,12 @@ def main():
             frame = shared_frame.get()
             if frame is None:
                 continue
-            frame = frame.copy()
+            # scale to display size FIRST, then draw - the overlays used to
+            # be drawn on the full 1280-wide frame and shrunk with it, which
+            # made the readout text noticeably smaller than intended (and
+            # meant drawing more pixels than needed). Landmarks use
+            # normalized coords, so they scale to any size.
+            frame = cv2.resize(frame, (cam_w, cam_h))
 
             hand_result, current_gesture = shared_detection.get()
             if hand_result is not None:
@@ -715,7 +736,7 @@ def main():
             # own aspect ratio, no bars; only the spin video hits max_w
             meme_view = fit_meme(meme_img, display_h, meme_max_w)
 
-            cv2.imshow("Camera", cv2.resize(frame, (cam_w, cam_h)))
+            cv2.imshow("Camera", frame)
             cv2.imshow("Meme", meme_view)
 
             # no delay beyond what's needed to pump the GUI event loop - the

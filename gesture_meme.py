@@ -644,10 +644,10 @@ def main():
             time.sleep(0.01)
 
         # cam window is sized ONCE here, to its own aspect ratio maximized
-        # within its half of the screen, and never touched again - nothing
-        # the meme does (including its own size) can resize the cam.
+        # within 2/3 of the screen's width, and never touched again -
+        # nothing the meme does (including its own size) can resize the cam.
         first_frame = shared_frame.get()
-        cam_w, cam_h = fit_within(first_frame.shape[1], first_frame.shape[0], screen_w // 2, avail_h)
+        cam_w, cam_h = fit_within(first_frame.shape[1], first_frame.shape[0], screen_w * 2 // 3, avail_h)
         meme_max_w = screen_w - cam_w  # whatever's left over, meme fits within - never touches the cam
 
         cv2.namedWindow(CAM_WINDOW, cv2.WINDOW_NORMAL)

@@ -30,6 +30,7 @@ Press q or ESC to quit.
 
 import math
 import random
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -420,14 +421,20 @@ def draw_landmarks(frame, hand_result):
 
 
 def get_screen_size():
-    """Actual display resolution, via a throwaway Tk root, so the two
-    windows can be sized to fit on screen instead of guessing."""
+    """Actual (logical) display resolution, so the two windows can be sized
+    to fit on screen instead of guessing.
+
+    Asks the window server through osascript rather than tkinter: Tk 8.6
+    aborts the whole process with an uncatchable ObjC NSException
+    (-[NSApplication macOSVersion]) on recent macOS, and osascript runs in
+    a subprocess, so any failure there can't take this process down.
+    """
     try:
-        import tkinter as tk
-        root = tk.Tk()
-        root.withdraw()
-        w, h = root.winfo_screenwidth(), root.winfo_screenheight()
-        root.destroy()
+        out = subprocess.run(
+            ["osascript", "-e", "tell application \"Finder\" to get bounds of window of desktop"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        _, _, w, h = (int(v.strip()) for v in out.split(","))
         return w, h
     except Exception:
         return 1440, 900

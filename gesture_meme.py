@@ -419,25 +419,10 @@ def draw_landmarks(frame, hand_result):
             cv2.circle(frame, (x, y), 4, (60, 140, 255), -1)
 
 
-# scale an image's own aspect ratio to the largest size that fits within a
-# box, without cropping or distorting it.
-def fit_within(img_w, img_h, box_w, box_h):
-    scale = min(box_w / img_w, box_h / img_h)
-    return max(1, int(img_w * scale)), max(1, int(img_h * scale))
-
-
-def get_screen_size():
-    """Query the actual display resolution (via a throwaway Tk root) so
-    windows can be sized/placed to fill the screen instead of guessing."""
-    try:
-        import tkinter as tk
-        root = tk.Tk()
-        root.withdraw()
-        w, h = root.winfo_screenwidth(), root.winfo_screenheight()
-        root.destroy()
-        return w, h
-    except Exception:
-        return 1440, 900
+def fit_to_height(img, height):
+    h, w = img.shape[:2]
+    scale = height / h
+    return cv2.resize(img, (int(w * scale), height))
 
 
 # The web version stays smooth under load because the <video> tag renders on
@@ -569,10 +554,6 @@ def main():
     )
 
     memes = load_memes()
-    # widest aspect ratio across every meme image, so the meme window can be
-    # given exactly enough room for the biggest one up front, instead of
-    # discovering mid-session that some meme doesn't fit
-    max_meme_aspect = max(img.shape[1] / img.shape[0] for imgs in memes.values() for img in imgs)
     memes["_current"] = random.choice(memes["default"])
     memes["_spin_restart"] = False
 
@@ -586,10 +567,6 @@ def main():
     spin_video_cap = cv2.VideoCapture(str(MEMES / GESTURE_MEMES["spinCat"][0]))
     if not spin_video_cap.isOpened():
         raise FileNotFoundError(f"missing meme file: {MEMES / GESTURE_MEMES['spinCat'][0]}")
-    spin_w = spin_video_cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    spin_h = spin_video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    if spin_w and spin_h:
-        max_meme_aspect = max(max_meme_aspect, spin_w / spin_h)
 
     def next_spin_frame():
         ok, vframe = spin_video_cap.read()
@@ -602,25 +579,18 @@ def main():
     if not cap.isOpened():
         raise RuntimeError("Could not open webcam (index 0)")
     # ask for a proper resolution and fps - an unconfigured VideoCapture
-    # often defaults to a low-res mode (this was the actual "quality" gap
-    # vs. the web version, which requests 640x480 but through getUserMedia's
-    # own negotiation that tends to pick a much better encode than
-    # AVFoundation's default). MJPG gives the camera more bandwidth
+    # often defaults to a low-res mode. MJPG gives the camera more bandwidth
     # headroom to hit both the resolution and the fps target.
-    # 4:3 instead of 16:9 - the cam window sits in a half-screen column,
-    # which is narrower than it is wide, so a 16:9 frame ends up short
-    # (looks small) once scaled to fit that column. 4:3 is much closer to
-    # the column's own aspect ratio, so it scales up bigger.
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     cap.set(cv2.CAP_PROP_FPS, 30)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # always grab the newest frame, not a queued stale one
 
-    CAM_WINDOW, MEME_WINDOW = "Camera", "Meme"
-    screen_w, screen_h = get_screen_size()
-    TOP_MARGIN = 60  # menu bar + window title bar, so windows don't get placed under them
-    avail_h = screen_h - TOP_MARGIN
+    cv2.namedWindow("Camera")
+    cv2.namedWindow("Meme")
+    cv2.moveWindow("Camera", 40, 80)
+    cv2.moveWindow("Meme", 720, 80)
 
     state = GestureState()
     shared_frame = SharedFrame()
@@ -646,27 +616,9 @@ def main():
     det_thread.start()
 
     try:
-        # wait for the first camera frame so we know its native aspect ratio
-        # before sizing the window (and so the window doesn't flash empty)
+        # wait for the first camera frame so the window doesn't flash empty
         while shared_frame.get() is None and not stop_event.is_set():
             time.sleep(0.01)
-
-        # reserve just enough width for the biggest meme at full height, plus
-        # a small gap so the two windows don't sit glued together - the cam
-        # gets everything else. Sized once, never touched again: no meme,
-        # however big, ever needs more room than this, so the cam never has
-        # to resize or get overlapped.
-        WINDOW_GAP = 24
-        meme_max_w = int(max_meme_aspect * avail_h)
-        first_frame = shared_frame.get()
-        cam_w, cam_h = fit_within(
-            first_frame.shape[1], first_frame.shape[0], screen_w - meme_max_w - WINDOW_GAP, avail_h
-        )
-
-        cv2.namedWindow(CAM_WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(CAM_WINDOW, cam_w, cam_h)
-        cv2.moveWindow(CAM_WINDOW, 0, TOP_MARGIN)  # left edge pinned to screen's left edge
-        cv2.namedWindow(MEME_WINDOW, cv2.WINDOW_NORMAL)
 
         while not stop_event.is_set():
             frame = shared_frame.get()
@@ -684,22 +636,16 @@ def main():
                     spin_video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     memes["_spin_restart"] = False
                 vframe = next_spin_frame()
-                meme_img = vframe if vframe is not None else memes["_current"]
+                meme_view = (
+                    fit_to_height(vframe, frame.shape[0])
+                    if vframe is not None
+                    else fit_to_height(memes["_current"], frame.shape[0])
+                )
             else:
-                meme_img = memes["_current"]
+                meme_view = fit_to_height(memes["_current"], frame.shape[0])
 
-            meme_w, meme_h = fit_within(meme_img.shape[1], meme_img.shape[0], meme_max_w, avail_h)
-
-            cv2.imshow(CAM_WINDOW, cv2.resize(frame, (cam_w, cam_h)))
-            cv2.imshow(MEME_WINDOW, cv2.resize(meme_img, (meme_w, meme_h)))
-            # macOS/Cocoa backend sometimes ignores resizeWindow if it's not
-            # re-applied after imshow, so pin the size every frame. Only the
-            # meme window is resized here - the cam window is fixed above.
-            cv2.resizeWindow(MEME_WINDOW, meme_w, meme_h)
-            # anchor the Meme window's RIGHT edge to the screen's right edge,
-            # so as the meme's width changes the window grows/shrinks
-            # leftward (into its own leftover space) instead of rightward
-            cv2.moveWindow(MEME_WINDOW, screen_w - meme_w, TOP_MARGIN)
+            cv2.imshow("Camera", frame)
+            cv2.imshow("Meme", meme_view)
 
             # no delay beyond what's needed to pump the GUI event loop - the
             # display rate is bounded by the camera thread, not by this wait

@@ -96,11 +96,12 @@ SIDE_EYE_YAW_DEG = 15.0
 HUH_ROLL_DEG = 18.0
 
 # how far open the mouth has to be to count as a scream. Measured as
-# lip-gap over face width, so it doesn't change with distance from the
-# camera: resting mouth sits near 0, talking hovers well under 0.35, and a
-# deliberate wide-open scream goes past it. Watch the live "mouth" readout
-# to tune.
-SCREAM_MOUTH_OPEN = 0.35
+# lip-gap over face height (chin to forehead), so it changes neither with
+# distance from the camera nor with the capture aspect ratio: a closed
+# mouth sits near 0, talking peaks around 0.08, and a deliberate
+# wide-open scream runs past 0.15. Watch the live "mouth" readout in the
+# Camera window to tune it for your face.
+SCREAM_MOUTH_OPEN = 0.15
 
 # spin detection: full-frame optical flow, downsized for speed. We compute
 # magnitude (how much of the frame moved, on average) each frame; coherence
@@ -313,9 +314,16 @@ class GestureState:
             f = face_result.face_landmarks[0]
             upper_lip, lower_lip = p3(f[13]), p3(f[14])
             right_cheek, left_cheek = p3(f[234]), p3(f[454])
+            forehead, chin = p3(f[10]), p3(f[152])
             mouth_center = (upper_lip + lower_lip) / 2
             face_width = dist(right_cheek, left_cheek)
-            mouth_open = dist(upper_lip, lower_lip) / face_width
+            # Normalize the lip gap against face HEIGHT, not width. Landmark
+            # x and y are normalized against the frame's width and height
+            # separately, so a vertical measurement over a horizontal one
+            # silently scales with the capture aspect ratio - the same
+            # scream would read differently at 16:9 than at 4:3. Chin to
+            # forehead is vertical like the lip gap, so that cancels out.
+            mouth_open = dist(upper_lip, lower_lip) / max(dist(forehead, chin), 1e-6)
 
             yaw_deg = roll_deg = 0.0
             if face_result.facial_transformation_matrixes:
@@ -625,17 +633,17 @@ def detection_loop(
             candidate_streak = 1
 
         if candidate_streak >= STABLE_FRAMES_REQUIRED and gesture != current_gesture:
+            current_gesture = gesture
             if gesture in VIDEO_GESTURES:
-                current_gesture = gesture
                 if gesture == "spinCat":
                     memes["_spin_restart"] = True
             elif gesture in memes:
-                current_gesture = gesture
                 memes["_current"] = random.choice(memes[gesture])
-            else:
-                # gesture is wired up but its artwork isn't in memes/ yet
-                # (load_memes reported it) - stay on whatever is showing
-                gesture = current_gesture
+            # else: gesture is wired up but its artwork isn't in memes/ yet
+            # (load_memes said so at startup). Still switch to it so the
+            # readout names it - that's what makes the detection tunable
+            # before the art exists - and leave the meme window showing
+            # whatever it had.
 
         if gesture != "default":
             last_non_default_at = now

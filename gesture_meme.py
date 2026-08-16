@@ -620,13 +620,6 @@ def main():
         while shared_frame.get() is None and not stop_event.is_set():
             time.sleep(0.01)
 
-        # right edge of the Meme window, pinned at its starting position -
-        # as the meme's width changes each frame, we re-move the window so
-        # this edge stays put and the window grows/shrinks leftward instead
-        # of rightward off screen
-        first_frame = shared_frame.get()
-        meme_right_x = 720 + fit_to_height(memes["_current"], first_frame.shape[0]).shape[1]
-
         while not stop_event.is_set():
             frame = shared_frame.get()
             if frame is None:
@@ -653,7 +646,6 @@ def main():
 
             cv2.imshow("Camera", frame)
             cv2.imshow("Meme", meme_view)
-            cv2.moveWindow("Meme", meme_right_x - meme_view.shape[1], 80)
 
             # no delay beyond what's needed to pump the GUI event loop - the
             # display rate is bounded by the camera thread, not by this wait

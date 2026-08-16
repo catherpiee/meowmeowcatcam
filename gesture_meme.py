@@ -297,6 +297,9 @@ class GestureState:
         self.last_yaw_debug = 0.0
         self.last_roll_debug = 0.0
         self.last_mouth_open_debug = 0.0
+        self.last_hands_debug = 0
+        self.last_pointing_debug = 0
+        self.last_tip_gap_debug = 0.0
         self.flow_history = []  # [(t, magnitude), ...] trailing samples, for the fraction-above trigger
         self.flow_peak_history = []  # [(t, score), ...] longer trailing window, for the readable peak display
         self.last_flow_magnitude_debug = 0.0
@@ -389,12 +392,19 @@ class GestureState:
             return "default"
 
         hands = [classify_hand(lm) for lm in hand_result.hand_landmarks]
+        self.last_hands_debug = len(hands)
 
         if len(hands) == 2:
+            # recorded for tuning: how many hands read as pointing, and how
+            # far apart the index tips are. Every observed run of this
+            # gesture was bracketed by crashOutCat, so one of these two is
+            # what drops out and lets the generic near-face pose take over.
+            self.last_pointing_debug = sum(1 for h in hands if is_pointing(h))
+            avg_scale = (hands[0]["handScale"] + hands[1]["handScale"]) / 2
+            self.last_tip_gap_debug = dist(hands[0]["indexTip"], hands[1]["indexTip"]) / avg_scale
+
             if is_pointing(hands[0]) and is_pointing(hands[1]):
-                avg_scale = (hands[0]["handScale"] + hands[1]["handScale"]) / 2
-                tip_gap = dist(hands[0]["indexTip"], hands[1]["indexTip"]) / avg_scale
-                if tip_gap < 1.4:
+                if self.last_tip_gap_debug < 1.4:
                     return "twoFingersTogether"
 
             if face_is_fresh:
@@ -492,6 +502,7 @@ def draw_debug_hud(frame, state, gesture):
         f"yaw  {state.last_yaw_debug:+5.1f}/{SIDE_EYE_YAW_DEG:.0f}",
         f"roll {state.last_roll_debug:+5.1f}/{HUH_ROLL_DEG:.0f}",
         f"mouth {state.last_mouth_open_debug:.2f}/{SCREAM_MOUTH_OPEN:.2f}",
+        f"hands {state.last_hands_debug} pt {state.last_pointing_debug} gap {state.last_tip_gap_debug:.2f}/1.40",
         f"flow {state.last_flow_magnitude_debug:.2f}/{SPIN_MAG_THRESHOLD:.2f}",
         f"spin {state.last_flow_fraction_debug:.2f}/{SPIN_FRACTION_REQUIRED:.2f}"
         f"  pk {state.last_flow_peak_debug:.2f}",
@@ -665,6 +676,8 @@ def detection_loop(
             f"{state.last_flow_peak_debug:.4f},"
             f"{state.last_mouth_open_debug:.4f},{state.last_yaw_debug:.2f},"
             f"{state.last_roll_debug:.2f},{int(state.face_seen_this_frame)},"
+            f"{state.last_hands_debug},{state.last_pointing_debug},"
+            f"{state.last_tip_gap_debug:.3f},"
             f"{gesture},{current_gesture}\n"
         )
 
@@ -736,7 +749,8 @@ def main():
     flow_log = open(flow_log_path, "w", buffering=1)  # line-buffered so data survives a hard kill
     flow_log.write(
         "t_ms,magnitude,coherence,score,fraction,peak_2s,"
-        "mouth_open,yaw,roll,face_seen,gesture_raw,gesture_shown\n"
+        "mouth_open,yaw,roll,face_seen,hands,pointing,tip_gap,"
+        "gesture_raw,gesture_shown\n"
     )
 
     spin_video_cap = cv2.VideoCapture(str(MEMES / GESTURE_MEMES["spinCat"][0]))

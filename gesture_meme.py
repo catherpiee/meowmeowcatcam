@@ -79,15 +79,6 @@ GESTURE_MEMES = {
 VIDEO_GESTURES = {"spinCat"}
 
 STABLE_FRAMES_REQUIRED = 5
-# Leaving a gesture that's already on screen takes more consecutive frames
-# than entering one does. Finger classification uses a hard angle cutoff,
-# so a finger held near it flickers: in a real recording of simply holding
-# one finger up, oneFingerUp was interrupted 56 times, mostly by fist -
-# interruptions of 2 frames at the median, but 12 of them lasted 5+ frames
-# and so survived the entry threshold. Requiring 12 frames to leave
-# filters 49 of the 56 while still reacting to a real gesture change in
-# under half a second.
-STABLE_FRAMES_TO_LEAVE = 12
 DEFAULT_FALLBACK_MS = 600
 FACE_STALE_MS = 1200
 
@@ -706,10 +697,7 @@ def detection_loop(
             candidate_gesture = gesture
             candidate_streak = 1
 
-        # sticky once committed: cheap to adopt a gesture from rest, but a
-        # gesture already on screen takes noticeably longer to displace
-        needed = STABLE_FRAMES_REQUIRED if current_gesture == "default" else STABLE_FRAMES_TO_LEAVE
-        if candidate_streak >= needed and gesture != current_gesture:
+        if candidate_streak >= STABLE_FRAMES_REQUIRED and gesture != current_gesture:
             current_gesture = gesture
             if gesture in VIDEO_GESTURES:
                 if gesture == "spinCat":

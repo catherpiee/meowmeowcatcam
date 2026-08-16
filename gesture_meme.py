@@ -609,11 +609,6 @@ def detection_loop(
 
         magnitude, coherence, prev_flow_gray = frame_flow_signal(frame, prev_flow_gray)
         state.update_flow(magnitude, coherence)
-        flow_log.write(
-            f"{time.time() * 1000:.0f},{magnitude:.4f},{coherence:.4f},"
-            f"{state.last_flow_score_debug:.4f},{state.last_flow_fraction_debug:.4f},"
-            f"{state.last_flow_peak_debug:.4f},{current_gesture}\n"
-        )
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = Image(image_format=ImageFormat.SRGB, data=rgb)
@@ -624,6 +619,18 @@ def detection_loop(
         state.update_face(face_result)
 
         gesture = state.decide(hand_result)
+
+        # logged after detection, so every column is from this same frame -
+        # the face columns are here to tune the mouth/roll thresholds
+        # against real recordings rather than by guesswork
+        flow_log.write(
+            f"{time.time() * 1000:.0f},{magnitude:.4f},{coherence:.4f},"
+            f"{state.last_flow_score_debug:.4f},{state.last_flow_fraction_debug:.4f},"
+            f"{state.last_flow_peak_debug:.4f},"
+            f"{state.last_mouth_open_debug:.4f},{state.last_yaw_debug:.2f},"
+            f"{state.last_roll_debug:.2f},{int(state.face_seen_this_frame)},"
+            f"{gesture},{current_gesture}\n"
+        )
 
         now = time.time() * 1000
         if gesture == candidate_gesture:
@@ -688,7 +695,10 @@ def main():
     # instead of trying to read a jittery number while dizzy.
     flow_log_path = ROOT / "flow_debug_log.csv"
     flow_log = open(flow_log_path, "w", buffering=1)  # line-buffered so data survives a hard kill
-    flow_log.write("t_ms,magnitude,coherence,score,fraction,peak_2s,gesture\n")
+    flow_log.write(
+        "t_ms,magnitude,coherence,score,fraction,peak_2s,"
+        "mouth_open,yaw,roll,face_seen,gesture_raw,gesture_shown\n"
+    )
 
     spin_video_cap = cv2.VideoCapture(str(MEMES / GESTURE_MEMES["spinCat"][0]))
     if not spin_video_cap.isOpened():

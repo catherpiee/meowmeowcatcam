@@ -673,13 +673,21 @@ def main():
         first_frame = shared_frame.get()
         cam_aspect = first_frame.shape[1] / first_frame.shape[0]
         screen_w, screen_h = get_screen_size()
-        LEFT, GAP, RIGHT, TOP, BOTTOM = 40, 40, 40, 80, 60
+        LEFT, GAP, RIGHT, TOP, BOTTOM = 12, 16, 12, 60, 40
+        # SIZE_SCALE pushes past the height at which cam and widest meme both
+        # fit at full size. The leftover width below absorbs it: the cam gets
+        # the full increase, and the widest memes give back a few pixels of
+        # width (scaled by fit_meme) rather than the whole layout staying
+        # small. Trimmed margins above supply most of the extra room.
+        SIZE_SCALE = 1.04
         display_h = min(
             screen_h - TOP - BOTTOM,
-            int((screen_w - LEFT - GAP - RIGHT) / (cam_aspect + widest_meme_aspect)),
+            int(SIZE_SCALE * (screen_w - LEFT - GAP - RIGHT) / (cam_aspect + widest_meme_aspect)),
         )
         cam_w, cam_h = int(cam_aspect * display_h), display_h
-        meme_max_w = int(widest_meme_aspect * display_h)  # reserved box the meme can never exceed
+        # whatever width is left after the cam - guarantees the meme window,
+        # however wide the meme, always lands on screen
+        meme_max_w = screen_w - LEFT - cam_w - GAP - RIGHT
 
         cv2.moveWindow("Camera", LEFT, TOP)
         cv2.moveWindow("Meme", LEFT + cam_w + GAP, TOP)

@@ -57,6 +57,28 @@ python3 -m http.server 8000
 
 Then open `http://localhost:8000` and allow camera access. Models load from Google's hosted MediaPipe CDN at runtime, so nothing local is needed for the browser version.
 
+## Running it - Docker
+
+The clean Docker target for this repo is the browser version.
+
+```bash
+docker compose up --build
+```
+
+Then open `http://localhost:8000` and allow camera access.
+
+Why this works well:
+- the browser app is just static files
+- your browser, not the container, owns webcam permission
+- MediaPipe WASM + hosted model assets still load at runtime in the browser
+
+Why the desktop Python app is not containerized here:
+- it needs direct webcam device access inside the container
+- it opens native OpenCV GUI windows
+- that setup is OS-specific and usually needs extra X11/Wayland or platform GUI passthrough
+
+If you want, that can be added later as a separate, opt-in developer container, but it would be a different setup from the simple one-command web container above.
+
 ## Live debug HUD
 
 The Camera window always shows a small readout in the top-left corner:

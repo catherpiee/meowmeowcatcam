@@ -78,3 +78,9 @@ memes/            meme images (+ one video, unused for now)
 models/           MediaPipe .task model files used by the desktop version
 requirements.txt  Python dependencies
 ```
+## Running the Browser Version
+
+1. Open a terminal in this repository.
+2. Run `python -m http.server 8000`.
+3. Open `http://localhost:8000` in your browser.
+4. Allow camera access when prompted.

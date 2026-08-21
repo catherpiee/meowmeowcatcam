@@ -64,17 +64,46 @@ The Camera window always shows a small readout in the top-left corner:
 ```
 gesture: sideEyeCat
 yaw: +18.4 deg  (side-eye thr +/-15.0)
+...
+calib [1/9] side_eye_yaw_deg: 15.0   ([ ] pick  - = nudge  p print)
 ```
 
-Useful for tuning the detection thresholds at the top of `gesture_meme.py` / `app.js` if a gesture is triggering too easily or not easily enough for your setup/lighting.
+Useful for seeing why a gesture is or isn't triggering for your setup/lighting.
+
+### Live calibration keys
+
+The detection thresholds are collected in the `Tunables` dataclass in
+`detection.py`. You can adjust them **while the app runs**, without editing code:
+
+| Key | Action |
+|---|---|
+| `[` / `]` | pick which threshold the HUD's `calib` line is showing |
+| `-` / `=` | nudge that threshold down / up (5% steps) |
+| `p` | print all current thresholds to the terminal |
+
+Nothing is written to disk — once a value feels right, press `p` and paste it
+into `Tunables` in `detection.py` to make it the new default.
+
+## Running the tests
+
+The hand/gesture classification logic lives in `detection.py` (pure geometry,
+no webcam) and is covered by `test_detection.py`:
+
+```bash
+python3 test_detection.py      # no extra dependencies
+# or, with pytest installed:
+pytest test_detection.py
+```
 
 ## Project layout
 
 ```
-gesture_meme.py   desktop version (OpenCV + MediaPipe Python tasks API)
-app.js            browser version (MediaPipe tasks-vision WASM)
-index.html        browser UI shell
-memes/            meme images (+ one video, unused for now)
-models/           MediaPipe .task model files used by the desktop version
-requirements.txt  Python dependencies
+gesture_meme.py     desktop version: camera, optical flow, rendering, main loop
+detection.py        pure hand/gesture classification + thresholds (webcam-free)
+test_detection.py   unit tests for detection.py
+app.js              browser version (MediaPipe tasks-vision WASM)
+index.html          browser UI shell
+memes/              meme images (+ one video, unused for now)
+models/             MediaPipe .task model files used by the desktop version
+requirements.txt    Python dependencies
 ```

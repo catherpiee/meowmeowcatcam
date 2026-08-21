@@ -22,15 +22,21 @@ Gestures:
 
 The Camera window shows a live debug readout (head yaw, and optical-flow
 magnitude/coherence, vs. their trigger thresholds) in the top-left corner so
-side-eye and spin can both be tuned by eye - see SIDE_EYE_YAW_DEG and
-SPIN_FLOW_SCORE_THRESHOLD below.
+side-eye and spin can both be tuned by eye. All detection thresholds live in
+detection.Tunables and can be nudged live with the calibration keys
+([ ] to pick, - = to nudge, p to print) - see the README.
+
+The hand/gesture classification itself lives in detection.py (pure geometry,
+no camera) so it can be unit-tested; this file owns the camera, optical flow,
+rendering and the main loop.
 
 Press q or ESC to quit.
 """
 
-import math
 import random
+import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -44,6 +50,17 @@ from mediapipe.tasks.python.vision import (
     RunningMode,
 )
 from mediapipe import Image, ImageFormat
+
+from detection import (
+    Tunables,
+    classify_hand,
+    dist,
+    dist2d,
+    is_pointing,
+    p3,
+    stable_gesture,
+    yaw_from_transform_matrix,
+)
 
 ROOT = Path(__file__).parent
 MODELS = ROOT / "models"
@@ -67,60 +84,22 @@ GESTURE_MEMES = {
 # gestures whose meme is a video, not a still image
 VIDEO_GESTURES = {"spinCat"}
 
-STABLE_FRAMES_REQUIRED = 5
 DEFAULT_FALLBACK_MS = 600
 FACE_STALE_MS = 1200
 
-# how far the head has to turn (yaw, in degrees, from MediaPipe's own head
-# pose estimate - not a hand-rolled distance heuristic) to count as a
-# side-eye look. Watch the live "yaw" readout in the Camera window while
-# turning your head to find the right value for you.
-SIDE_EYE_YAW_DEG = 15.0
+# All setup-dependent decision thresholds (side-eye yaw, spin fraction,
+# hand-to-face proximity, detector confidence, etc.) now live in
+# detection.Tunables, so they can be adjusted live by the calibration keys and
+# tested independently. See that dataclass for the documented defaults; the
+# comments about how the spin fraction test was tuned moved there too.
 
-# spin detection: full-frame optical flow, downsized for speed. We compute
-# magnitude (how much of the frame moved, on average) each frame; coherence
-# (what fraction of that motion agreed on one direction) is also computed
-# and logged for reference, but real recorded data showed it wasn't adding
-# discrimination - averaging magnitude across the whole frame already dilutes
-# out small localized motions (a hand gesture only fills a fraction of the
-# frame, so the frame-wide average stays low regardless of coherence).
-#
-# What actually separates a real spin from a quick lean/reach turned out to
-# be less about "how high does it peak" (both can peak similarly for an
-# instant) and more about *how much of a multi-second window stays elevated*.
-# A real spin is naturally bursty - you slow down, reposition, speed back
-# up - so requiring one perfectly unbroken stretch above threshold was too
-# strict and rejected real spins. Instead: over a trailing ~2.2s window,
-# what fraction of frames had magnitude above a modest threshold? A real
-# spin (even a "weak"/bursty one) kept that fraction above ~0.9; a one-off
-# lean/reach can only fill a fraction of a multi-second window before it
-# settles back down.
-#
-# Tuned from two real recorded sessions (flow_debug_log.csv, regenerated
-# each run):
-#   real spin (strong)  -> fraction above 0.8 stayed near 0.9-1.0
-#   real spin (weaker)  -> fraction above 0.8 peaked at 0.92-0.93
-#   fast sideways lean   -> a single ~1s burst, well under half of any 2s+ window
-# If it's still misfiring or not firing for you, flow_debug_log.csv has the
-# raw numbers from your most recent run - report back what fraction your
-# non-spin motions vs your spins actually reach so this can be re-tuned to
-# your setup.
+# Optical-flow computation constants (fixed pipeline params, not calibrated):
+# the frame is downsized to this size for speed before dense flow is computed.
 SPIN_FLOW_WIDTH = 160
 SPIN_FLOW_HEIGHT = 90
 SPIN_FLOW_NOISE_FLOOR_PX = 0.4  # per-pixel motion below this is treated as noise, not real motion
 SPIN_FLOW_MIN_MOVING_FRACTION = 0.15  # need at least this much of the frame moving to trust coherence at all
-SPIN_MAG_THRESHOLD = 0.8  # per-frame magnitude counted as "elevated" for the fraction test
-SPIN_FRACTION_WINDOW_MS = 2200  # trailing window the fraction is measured over
-SPIN_FRACTION_REQUIRED = 0.55  # fraction of that window that must be elevated to count as spinning
-SPIN_FLOW_PEAK_HOLD_MS = 2000
-
-# hand-covering-face: how close the hand needs to be to where the mouth
-# last was. Wider when the face detector has fully lost the face (strong
-# evidence of a real occlusion); tighter when the face is still partially
-# tracked (weaker evidence, avoid false positives from a hand just passing
-# near the face).
-HAND_COVER_FACE_DIST_FACE_LOST = 1.3
-HAND_COVER_FACE_DIST_FACE_SEEN = 0.7
+SPIN_FLOW_PEAK_HOLD_MS = 2000  # trailing window for the readable peak-score HUD display
 
 HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -132,88 +111,24 @@ HAND_CONNECTIONS = [
 ]
 
 
-# ---- geometry helpers (ported from the JS version) -----------------------
-def p3(lm):
-    return np.array([lm.x, lm.y, lm.z])
+# Geometry helpers and hand classification now live in detection.py so they can
+# be unit-tested without a webcam; they are imported at the top of this file.
 
 
-def dist(a, b):
-    return float(np.linalg.norm(a - b))
+def downsize_gray(frame):
+    """Cheap per-frame step: grayscale + shrink for optical flow. Kept separate
+    from the (expensive) flow computation so callers can run the shrink every
+    frame but the flow only every Nth frame (see Tunables.flow_every_n)."""
+    return cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (SPIN_FLOW_WIDTH, SPIN_FLOW_HEIGHT))
 
 
-def angle_deg(v1, v2):
-    m1, m2 = np.linalg.norm(v1), np.linalg.norm(v2)
-    if m1 < 1e-9 or m2 < 1e-9:
-        return 180.0
-    cos_a = np.clip(np.dot(v1, v2) / (m1 * m2), -1.0, 1.0)
-    return math.degrees(math.acos(cos_a))
-
-
-def finger_extended(pts, mcp, pip, tip):
-    v1 = pts[pip] - pts[mcp]
-    v2 = pts[tip] - pts[pip]
-    return angle_deg(v1, v2) < 45
-
-
-def yaw_from_transform_matrix(matrix):
-    """Extract the head's left/right turn angle (yaw, degrees) from
-    MediaPipe's facial transformation matrix - its own estimate of head
-    pose, far more robust than trying to infer turn from landmark
-    distances."""
-    r = np.asarray(matrix)[:3, :3]
-    sy = math.sqrt(r[0, 0] ** 2 + r[1, 0] ** 2)
-    if sy < 1e-6:
-        return 0.0
-    yaw = math.atan2(-r[2, 0], sy)
-    return math.degrees(yaw)
-
-
-def classify_hand(landmarks):
-    pts = [p3(lm) for lm in landmarks]
-    hand_scale = dist(pts[0], pts[9]) or 1e-6
-
-    index_up = finger_extended(pts, 5, 6, 8)
-    middle_up = finger_extended(pts, 9, 10, 12)
-    ring_up = finger_extended(pts, 13, 14, 16)
-    pinky_up = finger_extended(pts, 17, 18, 20)
-
-    thumb_pinky_spread = dist(pts[4], pts[17]) / hand_scale
-    thumb_out = thumb_pinky_spread > 1.05
-
-    curled_count = sum(1 for v in (index_up, middle_up, ring_up, pinky_up) if not v)
-
-    return {
-        "indexUp": index_up,
-        "middleUp": middle_up,
-        "ringUp": ring_up,
-        "pinkyUp": pinky_up,
-        "thumbOut": thumb_out,
-        "curledCount": curled_count,
-        "handScale": hand_scale,
-        "indexTip": pts[8],
-        "wrist": pts[0],
-        "palmCenter": pts[9],
-    }
-
-
-def is_pointing(h):
-    return h["indexUp"] and not h["middleUp"] and not h["ringUp"] and not h["pinkyUp"]
-
-
-def frame_flow_signal(frame, prev_small_gray):
-    """Downsize + compute dense optical flow against the previous frame,
-    then reduce it to (magnitude, coherence): how much of the frame moved
-    on the horizontal axis, and what fraction of that motion agreed on one
-    direction. Returns (magnitude, coherence, small_gray_for_next_call)."""
-    small = cv2.resize(
-        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (SPIN_FLOW_WIDTH, SPIN_FLOW_HEIGHT)
-    )
-    if prev_small_gray is None:
-        return 0.0, 0.0, small
-
-    flow = cv2.calcOpticalFlowFarneback(
-        prev_small_gray, small, None, 0.5, 2, 15, 2, 5, 1.2, 0
-    )
+def flow_signal(prev_small_gray, small_gray):
+    """Dense optical flow between two consecutive downsized frames, reduced to
+    (magnitude, coherence): how much of the frame moved on the horizontal axis,
+    and what fraction of that motion agreed on one direction. Always measured
+    over a single frame step, so its magnitude scale is independent of how often
+    it is called."""
+    flow = cv2.calcOpticalFlowFarneback(prev_small_gray, small_gray, None, 0.5, 2, 15, 2, 5, 1.2, 0)
     flow_x = flow[..., 0]
 
     magnitude = float(np.abs(flow_x).mean())
@@ -231,11 +146,12 @@ def frame_flow_signal(frame, prev_small_gray):
             agree = int((np.sign(flow_x[moving_mask]) == mean_sign).sum())
             coherence = agree / moving_count
 
-    return magnitude, coherence, small
+    return magnitude, coherence
 
 
 class GestureState:
-    def __init__(self):
+    def __init__(self, tun=None):
+        self.tun = tun or Tunables()
         self.last_face = None  # (mouth_center, face_width, mouth_open, yaw_deg, t)
         self.face_seen_this_frame = False
         self.last_yaw_debug = 0.0
@@ -252,7 +168,7 @@ class GestureState:
         score = magnitude * coherence  # kept for the debug HUD/log only, not the trigger
 
         self.flow_history.append((now, magnitude))
-        self.flow_history = [(t, m) for t, m in self.flow_history if now - t < SPIN_FRACTION_WINDOW_MS]
+        self.flow_history = [(t, m) for t, m in self.flow_history if now - t < self.tun.spin_fraction_window_ms]
 
         self.flow_peak_history.append((now, score))
         self.flow_peak_history = [
@@ -263,16 +179,16 @@ class GestureState:
         self.last_flow_coherence_debug = coherence
         self.last_flow_score_debug = score
         self.last_flow_peak_debug = max((s for _, s in self.flow_peak_history), default=0.0)
-        elevated = sum(1 for _, m in self.flow_history if m > SPIN_MAG_THRESHOLD)
+        elevated = sum(1 for _, m in self.flow_history if m > self.tun.spin_mag_threshold)
         self.last_flow_fraction_debug = elevated / len(self.flow_history) if self.flow_history else 0.0
 
     def is_spinning(self, now):
-        self.flow_history = [(t, m) for t, m in self.flow_history if now - t < SPIN_FRACTION_WINDOW_MS]
+        self.flow_history = [(t, m) for t, m in self.flow_history if now - t < self.tun.spin_fraction_window_ms]
         if not self.flow_history:
             return False
-        elevated = sum(1 for _, m in self.flow_history if m > SPIN_MAG_THRESHOLD)
+        elevated = sum(1 for _, m in self.flow_history if m > self.tun.spin_mag_threshold)
         fraction = elevated / len(self.flow_history)
-        return fraction > SPIN_FRACTION_REQUIRED
+        return fraction > self.tun.spin_fraction_required
 
     def update_face(self, face_result):
         now = time.time() * 1000
@@ -294,85 +210,112 @@ class GestureState:
             self.last_yaw_debug = yaw_deg
         self.face_seen_this_frame = saw_face
 
-    def decide(self, hand_result):
-        now = time.time() * 1000
-        face_is_fresh = self.last_face is not None and now - self.last_face[4] < FACE_STALE_MS
+    def _hands_from(self, hand_result):
+        """Classify each detected hand, attaching its MediaPipe handedness,
+        dropping low-confidence detections, and ordering the hands left-to-right
+        so two-hand logic is deterministic regardless of detection order."""
+        landmarks = hand_result.hand_landmarks
+        handedness = getattr(hand_result, "handedness", None) or []
+        hands = []
+        for i, lm in enumerate(landmarks):
+            entry = handedness[i] if i < len(handedness) else None
+            if isinstance(entry, (list, tuple)):
+                entry = entry[0] if entry else None
+            h = classify_hand(lm, entry)
+            score = h["handednessScore"]
+            if score is not None and score < self.tun.min_handedness_score:
+                continue
+            hands.append(h)
+        hands.sort(key=lambda h: float(h["palmCenter"][0]))
+        return hands
 
-        # spinning in the chair beats everything else, hands included.
-        if self.is_spinning(now):
-            return "spinCat"
+    def _hand_gesture(self, hands, face_is_fresh):
+        """The gesture implied purely by the hand shapes, or None if the hands
+        aren't making any specific gesture. Kept separate from decide() so that
+        spin can be gated on 'no specific hand gesture present'."""
+        if not hands:
+            return None
 
-        if not hand_result.hand_landmarks:
-            # no hands: side-eye is a face-only pose (head turned, no
-            # particular hand shape needed).
-            if face_is_fresh and abs(self.last_face[3]) > SIDE_EYE_YAW_DEG:
-                return "sideEyeCat"
-            return "default"
-
-        hands = [classify_hand(lm) for lm in hand_result.hand_landmarks]
-
-        if len(hands) == 2:
-            if is_pointing(hands[0]) and is_pointing(hands[1]):
-                avg_scale = (hands[0]["handScale"] + hands[1]["handScale"]) / 2
-                tip_gap = dist(hands[0]["indexTip"], hands[1]["indexTip"]) / avg_scale
-                if tip_gap < 1.4:
+        if len(hands) >= 2:
+            a, b = hands[0], hands[1]
+            if is_pointing(a) and is_pointing(b):
+                avg_scale = (a["handScale"] + b["handScale"]) / 2 or 1e-6
+                tip_gap = dist2d(a["indexTip"], b["indexTip"]) / avg_scale
+                if tip_gap < self.tun.two_fingers_tip_gap:
                     return "twoFingersTogether"
 
             if face_is_fresh:
                 mouth_center, face_width, _, _, _ = self.last_face
                 near_face = all(
-                    dist(h["palmCenter"], mouth_center) / face_width < 2.2 for h in hands
+                    dist2d(h["palmCenter"], mouth_center) / face_width < self.tun.near_face_palm_dist
+                    for h in hands
                 )
                 if near_face:
-                    head_top_y = mouth_center[1] - face_width * 1.1
-                    both_above_head = all(h["palmCenter"][1] < head_top_y for h in hands)
-                    if both_above_head:
+                    head_top_y = mouth_center[1] - face_width * self.tun.head_top_offset
+                    if all(h["palmCenter"][1] < head_top_y for h in hands):
                         return "twoHandsOnHead"
                     return "crashOutCat"
 
         h = hands[0]
 
-        if h["curledCount"] == 4:
+        # thumb tucked in confirms a real fist rather than a partly-open hand.
+        if h["curledCount"] == 4 and not h["thumbExtended"]:
             return "fist"
 
-        if h["thumbOut"] and h["pinkyUp"] and not h["indexUp"] and not h["middleUp"] and not h["ringUp"]:
+        if (
+            h["thumbExtended"] and h["pinkyUp"]
+            and not h["indexUp"] and not h["middleUp"] and not h["ringUp"]
+        ):
             return "rockstar"
 
         # shhh / one-finger-up: a single extended index finger is a very
-        # specific shape (shhh in particular = fingertip right on the
-        # mouth), so it must be checked before the broader hand-covering-
-        # face test below - otherwise a shhh pose (finger near the mouth)
-        # gets swallowed by the "any hand near the face" check.
+        # specific shape (shhh in particular = fingertip right on the mouth), so
+        # it must be checked before the broader hand-covering-face test below.
         if h["indexUp"] and not h["middleUp"] and not h["ringUp"] and not h["pinkyUp"]:
             if face_is_fresh:
                 mouth_center, face_width, _, _, _ = self.last_face
-                d = dist(h["indexTip"], mouth_center) / face_width
-                if d < 0.55:
+                if dist2d(h["indexTip"], mouth_center) / face_width < self.tun.shhh_mouth_dist:
                     return "shhh"
             return "oneFingerUp"
 
-        # hand covering face: the one hand we see sits roughly where the
-        # face last was. Wider tolerance if the face detector has fully
-        # lost the face (strong evidence of a real occlusion); tighter if
-        # it's still partially tracking through the fingers.
+        # hand covering face: the one hand we see sits roughly where the face
+        # last was. Wider tolerance if the face detector has fully lost the face
+        # (strong evidence of real occlusion); tighter if it's still tracking.
         if face_is_fresh:
             mouth_center, face_width, _, _, _ = self.last_face
-            d = dist(h["palmCenter"], mouth_center) / face_width
+            d = dist2d(h["palmCenter"], mouth_center) / face_width
             threshold = (
-                HAND_COVER_FACE_DIST_FACE_LOST
+                self.tun.hand_cover_face_dist_face_lost
                 if not self.face_seen_this_frame
-                else HAND_COVER_FACE_DIST_FACE_SEEN
+                else self.tun.hand_cover_face_dist_face_seen
             )
             if d < threshold:
                 return "handCoverFace"
 
-        # open palm held out, not near the face
-        if h["curledCount"] == 0:
+        # open palm held out toward the camera, not near the face
+        if h["fingersExtended"] == 4 and h["thumbExtended"] and h["palmFacingCamera"]:
             return "handStretchedOut"
 
-        # hands are up but not making a specific shape - still allow a
-        # strong side-eye read to win over an ambiguous hand pose.
-        if face_is_fresh and abs(self.last_face[3]) > SIDE_EYE_YAW_DEG:
+        return None
+
+    def decide(self, hand_result):
+        now = time.time() * 1000
+        face_is_fresh = self.last_face is not None and now - self.last_face[4] < FACE_STALE_MS
+
+        hands = self._hands_from(hand_result) if hand_result.hand_landmarks else []
+        hand_gesture = self._hand_gesture(hands, face_is_fresh)
+
+        # A specific hand gesture wins over spin: fast hand-waving produces the
+        # same horizontal optical flow as a chair spin, so spin only takes over
+        # when the hands aren't clearly forming a gesture.
+        if hand_gesture is not None:
+            return hand_gesture
+
+        if self.is_spinning(now):
+            return "spinCat"
+
+        # face-only poses (no gesturing hands): a turned head is a side-eye.
+        if face_is_fresh and abs(self.last_face[3]) > self.tun.side_eye_yaw_deg:
             return "sideEyeCat"
 
         return "default"
@@ -394,14 +337,21 @@ def load_memes():
     return cache
 
 
-def draw_debug_hud(frame, state, gesture):
+def draw_debug_hud(frame, state, gesture, calib=None):
+    tun = state.tun
     lines = [
         f"gesture: {gesture}",
-        f"yaw: {state.last_yaw_debug:+.1f} deg  (side-eye thr +/-{SIDE_EYE_YAW_DEG:.1f})",
-        f"flow mag: {state.last_flow_magnitude_debug:.2f}  (thr {SPIN_MAG_THRESHOLD:.2f})",
-        f"spin fraction (2.2s window): {state.last_flow_fraction_debug:.2f}  (thr {SPIN_FRACTION_REQUIRED:.2f})",
+        f"yaw: {state.last_yaw_debug:+.1f} deg  (side-eye thr +/-{tun.side_eye_yaw_deg:.1f})",
+        f"flow mag: {state.last_flow_magnitude_debug:.2f}  (thr {tun.spin_mag_threshold:.2f})",
+        f"spin fraction ({tun.spin_fraction_window_ms / 1000:.1f}s window): "
+        f"{state.last_flow_fraction_debug:.2f}  (thr {tun.spin_fraction_required:.2f})",
         f"peak score (last 2s): {state.last_flow_peak_debug:.2f}  <- read this AFTER you stop spinning",
     ]
+    if calib is not None:
+        lines.append(
+            f"calib [{calib.i + 1}/{len(calib.fields)}] {calib.label}: {calib.value}"
+            f"   ({Calibration.KEYS_HELP})"
+        )
     for i, line in enumerate(lines):
         y = 24 + i * 22
         cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
@@ -424,12 +374,99 @@ def fit_to_height(img, height):
     return cv2.resize(img, (int(w * scale), height))
 
 
+class Calibration:
+    """Live threshold tuning from the keyboard, so you can dial detection in on
+    your own setup without editing code and restarting. Nudges the running
+    Tunables in place; nothing is written to disk. Press 'p' to print the
+    current values so you can paste the good ones back into Tunables."""
+
+    KEYS_HELP = "[ ] pick  - = nudge  p print"
+
+    def __init__(self, tun):
+        self.tun = tun
+        self.fields = tun.fields_for_calibration()
+        self.i = 0
+
+    @property
+    def label(self):
+        return self.fields[self.i][0]
+
+    @property
+    def value(self):
+        return getattr(self.tun, self.fields[self.i][1])
+
+    def _nudge(self, direction):
+        attr = self.fields[self.i][1]
+        v = getattr(self.tun, attr)
+        step = max(abs(v) * 0.05, 0.05)  # 5% of the value, with a sensible floor
+        setattr(self.tun, attr, round(v + direction * step, 4))
+
+    def dump(self):
+        print("\n--- calibrated thresholds (paste into detection.Tunables) ---")
+        for _, attr in self.fields:
+            print(f"    {attr}: float = {getattr(self.tun, attr)}")
+        print("-------------------------------------------------------------")
+
+    def handle_key(self, key):
+        if key == ord("["):
+            self.i = (self.i - 1) % len(self.fields)
+        elif key == ord("]"):
+            self.i = (self.i + 1) % len(self.fields)
+        elif key == ord("-"):
+            self._nudge(-1)
+        elif key in (ord("="), ord("+")):
+            self._nudge(1)
+        elif key == ord("p"):
+            self.dump()
+
+
+CAMERA_INDICES_TO_TRY = 5
+CAMERA_OPEN_READS = 20
+FRAME_READ_RETRIES = 30
+
+
+def open_webcam():
+    """Open the first camera that actually yields a frame.
+
+    On macOS, index 0 is often a Continuity Camera (iPhone) that reports as
+    opened but never produces frames. A freshly granted Camera permission
+    can also make the first few reads fail on the built-in webcam.
+    """
+    backends = [cv2.CAP_ANY]
+    if sys.platform == "darwin" and hasattr(cv2, "CAP_AVFOUNDATION"):
+        backends = [cv2.CAP_AVFOUNDATION, cv2.CAP_ANY]
+
+    for backend in backends:
+        for index in range(CAMERA_INDICES_TO_TRY):
+            cap = cv2.VideoCapture(index, backend)
+            if not cap.isOpened():
+                cap.release()
+                continue
+            for _ in range(CAMERA_OPEN_READS):
+                ok, frame = cap.read()
+                if ok and frame is not None and frame.size:
+                    return cap
+                time.sleep(0.05)
+            cap.release()
+
+    raise RuntimeError(
+        "Could not open a webcam. On macOS: System Settings → Privacy & "
+        "Security → Camera, enable access for Terminal, Cursor, and Python, "
+        "then rerun this script."
+    )
+
+
 def main():
+    tun = Tunables()
+
     hand_landmarker = HandLandmarker.create_from_options(
         HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(MODELS / "hand_landmarker.task")),
             running_mode=RunningMode.VIDEO,
             num_hands=2,
+            min_hand_detection_confidence=tun.min_hand_confidence,
+            min_hand_presence_confidence=tun.min_hand_confidence,
+            min_tracking_confidence=tun.min_tracking_confidence,
         )
     )
     face_landmarker = FaceLandmarker.create_from_options(
@@ -438,6 +475,9 @@ def main():
             running_mode=RunningMode.VIDEO,
             num_faces=1,
             output_facial_transformation_matrixes=True,
+            min_face_detection_confidence=tun.min_face_confidence,
+            min_face_presence_confidence=tun.min_face_confidence,
+            min_tracking_confidence=tun.min_tracking_confidence,
         )
     )
 
@@ -461,38 +501,50 @@ def main():
             ok, vframe = spin_video_cap.read()
         return vframe
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        raise RuntimeError("Could not open webcam (index 0)")
+    cap = open_webcam()
 
     cv2.namedWindow("Camera")
     cv2.namedWindow("Meme")
     cv2.moveWindow("Camera", 40, 80)
     cv2.moveWindow("Meme", 720, 80)
 
-    state = GestureState()
+    state = GestureState(tun)
+    calib = Calibration(tun)
     current_gesture = "default"
-    candidate_gesture = "default"
-    candidate_streak = 0
+    recent_gestures = deque(maxlen=tun.stable_frames)  # sliding window for the majority vote
     last_non_default_at = time.time() * 1000
     current_meme = random.choice(memes["default"])
     prev_flow_gray = None
+    frame_idx = 0
 
     start_time = time.time()
+    missed_frames = 0
     try:
         while True:
             ok, frame = cap.read()
             if not ok:
-                break
+                missed_frames += 1
+                if missed_frames > FRAME_READ_RETRIES:
+                    break
+                continue
+            missed_frames = 0
             frame = cv2.flip(frame, 1)  # mirror, like a selfie cam
 
-            magnitude, coherence, prev_flow_gray = frame_flow_signal(frame, prev_flow_gray)
-            state.update_flow(magnitude, coherence)
-            flow_log.write(
-                f"{time.time() * 1000:.0f},{magnitude:.4f},{coherence:.4f},"
-                f"{state.last_flow_score_debug:.4f},{state.last_flow_fraction_debug:.4f},"
-                f"{state.last_flow_peak_debug:.4f},{current_gesture}\n"
-            )
+            # Optical flow is the expensive step, so run it only every Nth frame.
+            # The shrink is cheap and happens every frame, so each flow is still
+            # measured between two consecutive frames (its magnitude scale is
+            # unchanged) - we just compute it less often.
+            frame_idx += 1
+            small_gray = downsize_gray(frame)
+            if prev_flow_gray is not None and frame_idx % tun.flow_every_n == 0:
+                magnitude, coherence = flow_signal(prev_flow_gray, small_gray)
+                state.update_flow(magnitude, coherence)
+                flow_log.write(
+                    f"{time.time() * 1000:.0f},{magnitude:.4f},{coherence:.4f},"
+                    f"{state.last_flow_score_debug:.4f},{state.last_flow_fraction_debug:.4f},"
+                    f"{state.last_flow_peak_debug:.4f},{current_gesture}\n"
+                )
+            prev_flow_gray = small_gray
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = Image(image_format=ImageFormat.SRGB, data=rgb)
@@ -505,17 +557,17 @@ def main():
             gesture = state.decide(hand_result)
 
             now = time.time() * 1000
-            if gesture == candidate_gesture:
-                candidate_streak += 1
-            else:
-                candidate_gesture = gesture
-                candidate_streak = 1
-
-            if candidate_streak >= STABLE_FRAMES_REQUIRED and gesture != current_gesture:
-                current_gesture = gesture
-                if gesture not in VIDEO_GESTURES:
-                    current_meme = random.choice(memes[gesture])
-                elif gesture == "spinCat":
+            # Anti-flicker: switch to the gesture that wins a majority of the
+            # last few frames, rather than trusting any single frame. This
+            # settles the churn between the face-adjacent poses (crash-out /
+            # hands-on-head / hand-cover-face) that share overlapping shapes.
+            recent_gestures.append(gesture)
+            stable = stable_gesture(recent_gestures, current_gesture)
+            if stable != current_gesture:
+                current_gesture = stable
+                if stable not in VIDEO_GESTURES:
+                    current_meme = random.choice(memes[stable])
+                elif stable == "spinCat":
                     spin_video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
             if gesture != "default":
@@ -525,7 +577,7 @@ def main():
                 current_meme = random.choice(memes["default"])
 
             draw_landmarks(frame, hand_result)
-            draw_debug_hud(frame, state, current_gesture)
+            draw_debug_hud(frame, state, current_gesture, calib)
 
             if current_gesture == "spinCat":
                 vframe = next_spin_frame()
@@ -542,6 +594,8 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q") or key == 27:
                 break
+            if key != 255:  # 255 == no key this frame
+                calib.handle_key(key)
     finally:
         cap.release()
         spin_video_cap.release()

@@ -30,6 +30,7 @@ Press q or ESC to quit.
 
 import math
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -424,6 +425,42 @@ def fit_to_height(img, height):
     return cv2.resize(img, (int(w * scale), height))
 
 
+CAMERA_INDICES_TO_TRY = 5
+CAMERA_OPEN_READS = 20
+FRAME_READ_RETRIES = 30
+
+
+def open_webcam():
+    """Open the first camera that actually yields a frame.
+
+    On macOS, index 0 is often a Continuity Camera (iPhone) that reports as
+    opened but never produces frames. A freshly granted Camera permission
+    can also make the first few reads fail on the built-in webcam.
+    """
+    backends = [cv2.CAP_ANY]
+    if sys.platform == "darwin" and hasattr(cv2, "CAP_AVFOUNDATION"):
+        backends = [cv2.CAP_AVFOUNDATION, cv2.CAP_ANY]
+
+    for backend in backends:
+        for index in range(CAMERA_INDICES_TO_TRY):
+            cap = cv2.VideoCapture(index, backend)
+            if not cap.isOpened():
+                cap.release()
+                continue
+            for _ in range(CAMERA_OPEN_READS):
+                ok, frame = cap.read()
+                if ok and frame is not None and frame.size:
+                    return cap
+                time.sleep(0.05)
+            cap.release()
+
+    raise RuntimeError(
+        "Could not open a webcam. On macOS: System Settings → Privacy & "
+        "Security → Camera, enable access for Terminal, Cursor, and Python, "
+        "then rerun this script."
+    )
+
+
 def main():
     hand_landmarker = HandLandmarker.create_from_options(
         HandLandmarkerOptions(
@@ -461,9 +498,7 @@ def main():
             ok, vframe = spin_video_cap.read()
         return vframe
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        raise RuntimeError("Could not open webcam (index 0)")
+    cap = open_webcam()
 
     cv2.namedWindow("Camera")
     cv2.namedWindow("Meme")
@@ -479,11 +514,16 @@ def main():
     prev_flow_gray = None
 
     start_time = time.time()
+    missed_frames = 0
     try:
         while True:
             ok, frame = cap.read()
             if not ok:
-                break
+                missed_frames += 1
+                if missed_frames > FRAME_READ_RETRIES:
+                    break
+                continue
+            missed_frames = 0
             frame = cv2.flip(frame, 1)  # mirror, like a selfie cam
 
             magnitude, coherence, prev_flow_gray = frame_flow_signal(frame, prev_flow_gray)

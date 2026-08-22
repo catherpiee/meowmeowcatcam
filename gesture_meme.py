@@ -132,7 +132,7 @@ HAND_CONNECTIONS = [
 ]
 
 
-# ---- geometry helpers (ported from the JS version) ----------------------
+# ---- geometry helpers (ported from the JS version) ---------------------
 def p3(lm):
     return np.array([lm.x, lm.y, lm.z])
 

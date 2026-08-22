@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"  # Location of requirements.txt
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-name: "mediapipe"
+      - dependency-name: "numpy"
+      - dependency-name: "opencv-contrib-python"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      include: "scope"

@@ -1,0 +1,102 @@
+name: 🐛 Bug Report
+description: Report something broken in meowmeowcatcam
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the details below so it can be reproduced and fixed quickly.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what went wrong.
+      placeholder: When I try to download X, the app crashes / hangs / produces the wrong output...
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce the issue?
+      placeholder: |
+        1. Open meowmeowcatcam
+        2. Paste this URL: ...
+        3. Select format/quality: ...
+        4. Click Download
+        5. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output
+      description: Paste any console output, stack traces, or error messages. This will be automatically formatted as code.
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: app-version
+    attributes:
+      label: meowmeowcatcam version / commit
+      placeholder: e.g. v0.3.1 or commit hash
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Other (specify below)
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: e.g. 3.11.4
+    validations:
+      required: true
+
+  - type: textarea
+    id: deps
+    attributes:
+      label: Dependency versions (if known)
+      description: MediaPipe, NumPy, and OpenCV versions used in this project. You can check them with `python -m pip show mediapipe numpy opencv-contrib-python`.
+      placeholder: |
+        mediapipe: 1.0.0
+        numpy: 2.5.1
+        opencv-contrib-python: 5.0.0.93
+        Python: 3.11.4
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues to make sure this hasn't already been reported
+          required: true
+        - label: I have included the full error/log output, if any
+          required: false
+        - label: This is a functionality bug, not a security vulnerability (security issues should go through the private [Security Advisory](../security/advisories/new) form instead)
+          required: true

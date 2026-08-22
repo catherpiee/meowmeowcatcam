@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/d4rkvista/meowmeowcatcam/security/advisories/new
+    about: Please do NOT report security vulnerabilities through public GitHub issues. Use this private advisory form instead.
+  - name: 💬 Ask a question / get help
+    url: https://github.com/d4rkvista/meowmeowcatcam/discussions
+    about: For general questions or usage help, please use Discussions instead of opening an issue.

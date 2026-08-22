@@ -32,17 +32,24 @@ Meme images live in `memes/`. A couple of gestures pick randomly between multipl
 
 Requires Python 3 and a webcam.
 
-Easiest way: just double-click **`Launch Gesture Meme.command`**. First run takes a minute to set itself up (installs everything automatically), then launches straight away. Every run after that is instant.
+The desktop launchers now automatically check for dependency updates on every run before launching the app, across macOS, Windows, and Linux.
 
-**First time opening it:** macOS will warn "cannot be opened because it is from an unidentified developer" — this is normal for any downloaded script, not specific to this one. Right-click the file → **Open** → click **Open** in the dialog that appears. You only need to do this once.
+- macOS: double-click **`Launch_Gesture_Meme.command`**
+- Windows: double-click **`Launch_Gesture_Meme.bat`**
+- Linux: run **`./Launch_Gesture_Meme.sh`** from a terminal
+
+On first run, the launcher creates a local `.venv` and installs the required packages. After that, it refreshes the environment from `requirements.txt` before starting the app, so updates are picked up automatically.
+
+**First time opening it (macOS):** macOS may warn "cannot be opened because it is from an unidentified developer" — this is normal for any downloaded script, not specific to this one. Right-click the file → **Open** → click **Open** in the dialog that appears. You only need to do this once.
 
 Or manually, if you prefer Terminal:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-python3 gesture_meme.py
+python -m pip install --upgrade pip
+python -m pip install --upgrade -r requirements.txt
+python gesture_meme.py
 ```
 
 Press `q` or `Esc` in the Camera window to quit.

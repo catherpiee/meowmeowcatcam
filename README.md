@@ -36,7 +36,7 @@ The desktop launchers now automatically check for dependency updates on every ru
 
 - macOS: double-click **`Launch_Gesture_Meme.command`**
 - Windows: double-click **`Launch_Gesture_Meme.bat`**
-- Linux: run **`./Launch_Gesture_Meme.sh`** from a terminal
+- Linux: run **`chmod +x Launch_Gesture_Meme.sh && ./Launch_Gesture_Meme.sh`** from a terminal
 
 On first run, the launcher creates a local `.venv` and installs the required packages. After that, it refreshes the environment from `requirements.txt` before starting the app, so updates are picked up automatically.
 

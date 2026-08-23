@@ -45,6 +45,12 @@ pip install -r requirements.txt
 python3 gesture_meme.py
 ```
 
+Uses the built-in webcam by default. For an external camera, pass its index:
+
+```bash
+python3 gesture_meme.py --camera 1   # try 2 if 1 is not it
+```
+
 Press `q` or `Esc` in the Camera window to quit.
 
 ## Running it — browser

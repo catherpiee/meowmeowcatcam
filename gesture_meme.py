@@ -28,7 +28,9 @@ SPIN_FLOW_SCORE_THRESHOLD below.
 Press q or ESC to quit.
 """
 
+import argparse
 import math
+import os
 import random
 import time
 from pathlib import Path
@@ -425,6 +427,15 @@ def fit_to_height(img, height):
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--camera",
+        type=int,
+        default=0,
+        help="camera index (0 = built-in, try 1 or 2 for an external USB cam)",
+    )
+    args = ap.parse_args()
+
     hand_landmarker = HandLandmarker.create_from_options(
         HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(MODELS / "hand_landmarker.task")),
@@ -461,9 +472,14 @@ def main():
             ok, vframe = spin_video_cap.read()
         return vframe
 
-    cap = cv2.VideoCapture(0)
+    # ponytail: DSHOW on Windows - the default MSMF backend is slow to open USB
+    # cams and sometimes fails on them outright. CAP_ANY everywhere else.
+    backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
+    cap = cv2.VideoCapture(args.camera, backend)
     if not cap.isOpened():
-        raise RuntimeError("Could not open webcam (index 0)")
+        raise RuntimeError(
+            f"Could not open camera index {args.camera} - try --camera 1 or --camera 2"
+        )
 
     cv2.namedWindow("Camera")
     cv2.namedWindow("Meme")

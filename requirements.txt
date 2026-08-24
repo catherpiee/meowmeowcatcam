@@ -1,3 +1,15 @@
+# mediapipe 1.0.1 aborts on macOS: its TensorsToDetectionsCalculator asks for the
+# Metal/GPU graph service that the wheel never registers, so every landmarker
+# create_from_options() dies with "Check failed: service_ Service is unavailable".
+# 1.0.0 registers the GL context correctly. Keep this pinned until 1.0.2+ is verified.
 mediapipe==1.0.0
-numpy==2.5.1
+
+# The launcher builds .venv from whatever `python3` resolves to, which on stock
+# macOS is the system Python 3.9. numpy 2.5.x requires Python >= 3.12, so a bare
+# `numpy==2.5.1` is unresolvable there. Pin per interpreter rather than leaving it
+# unpinned: an unpinned numpy silently resolves to a different version on every
+# machine, which is the same class of breakage the mediapipe pin above guards against.
+numpy==2.0.2; python_version < "3.12"
+numpy==2.5.1; python_version >= "3.12"
+
 opencv-contrib-python==5.0.0.93

@@ -69,6 +69,12 @@ VIDEO_GESTURES = {"spinCat"}
 
 STABLE_FRAMES_REQUIRED = 5
 DEFAULT_FALLBACK_MS = 600
+
+# once a meme is on screen it stays for at least this long, even if the
+# classifier changes its mind. Without it a single ~330ms misread (five
+# frames at 15fps) is enough to flash a wrong meme. Kept above
+# DEFAULT_FALLBACK_MS so returning to default is never blocked by the hold.
+MIN_HOLD_MS = 700
 FACE_STALE_MS = 1200
 
 # how far the head has to turn (yaw, in degrees, from MediaPipe's own head
@@ -121,6 +127,10 @@ SPIN_FLOW_PEAK_HOLD_MS = 2000
 # near the face).
 HAND_COVER_FACE_DIST_FACE_LOST = 1.3
 HAND_COVER_FACE_DIST_FACE_SEEN = 0.7
+
+# how close the index fingertip has to be to the mouth (in face widths) for a
+# single raised finger to read as "shhh" rather than "one finger up"
+SHHH_TIP_DIST = 0.55
 
 HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -247,8 +257,8 @@ class GestureState:
         self.last_flow_peak_debug = 0.0
         self.last_flow_fraction_debug = 0.0
 
-    def update_flow(self, magnitude, coherence):
-        now = time.time() * 1000
+    def update_flow(self, magnitude, coherence, now=None):
+        now = time.time() * 1000 if now is None else now
         score = magnitude * coherence  # kept for the debug HUD/log only, not the trigger
 
         self.flow_history.append((now, magnitude))
@@ -274,8 +284,8 @@ class GestureState:
         fraction = elevated / len(self.flow_history)
         return fraction > SPIN_FRACTION_REQUIRED
 
-    def update_face(self, face_result):
-        now = time.time() * 1000
+    def update_face(self, face_result, now=None):
+        now = time.time() * 1000 if now is None else now
         saw_face = bool(face_result.face_landmarks)
 
         if saw_face:
@@ -294,8 +304,8 @@ class GestureState:
             self.last_yaw_debug = yaw_deg
         self.face_seen_this_frame = saw_face
 
-    def decide(self, hand_result):
-        now = time.time() * 1000
+    def decide(self, hand_result, now=None):
+        now = time.time() * 1000 if now is None else now
         face_is_fresh = self.last_face is not None and now - self.last_face[4] < FACE_STALE_MS
 
         # spinning in the chair beats everything else, hands included.
@@ -310,6 +320,13 @@ class GestureState:
             return "default"
 
         hands = [classify_hand(lm) for lm in hand_result.hand_landmarks]
+        handedness = getattr(hand_result, "handedness", None) or []
+        for i, h in enumerate(hands):
+            h["handedness"] = (
+                handedness[i][0].category_name
+                if i < len(handedness) and handedness[i]
+                else None
+            )
 
         if len(hands) == 2:
             if is_pointing(hands[0]) and is_pointing(hands[1]):
@@ -330,7 +347,42 @@ class GestureState:
                         return "twoHandsOnHead"
                     return "crashOutCat"
 
-        h = hands[0]
+        # MediaPipe does not guarantee a stable order for hand_landmarks
+        # between frames, so picking hands[0] made the result flip at random
+        # when two hands were up. Order by handedness label first - it stays
+        # attached to the same physical hand as it moves, unlike palmCenter
+        # x, which is a noisy float that can flip sort order frame to frame
+        # when two hands cross or sit at near-equal x (e.g. both hands
+        # forming different valid gestures at once). Fall back to position
+        # only when handedness is missing (label is None for both, or ties),
+        # then let the first hand that forms a real gesture win - a
+        # deliberate gesture in either hand beats a hand that is merely
+        # present.
+        for h in sorted(
+            hands, key=lambda c: (c["handedness"] or "", c["palmCenter"][0], c["palmCenter"][1])
+        ):
+            gesture = self._decide_single_hand(h, now)
+            if gesture is not None:
+                return gesture
+
+        # hands are up but none formed a specific shape - still allow a
+        # strong side-eye read to win over an ambiguous hand pose.
+        if face_is_fresh and abs(self.last_face[3]) > SIDE_EYE_YAW_DEG:
+            return "sideEyeCat"
+
+        return "default"
+
+    def _decide_single_hand(self, h, now):
+        """Run the single-hand ladder for one classified hand.
+
+        Returns a gesture name, or None if this hand forms no specific shape.
+        """
+        # Recomputed rather than passed in from decide(): decide() needs its
+        # own face_is_fresh before hands are even classified (to short-circuit
+        # the no-hands side-eye path), so the two call sites can't share one
+        # value without threading it through every intermediate call. Keep
+        # this recomputation in sync with the one in decide() if either changes.
+        face_is_fresh = self.last_face is not None and now - self.last_face[4] < FACE_STALE_MS
 
         if h["curledCount"] == 4:
             return "fist"
@@ -347,7 +399,7 @@ class GestureState:
             if face_is_fresh:
                 mouth_center, face_width, _, _, _ = self.last_face
                 d = dist(h["indexTip"], mouth_center) / face_width
-                if d < 0.55:
+                if d < SHHH_TIP_DIST:
                     return "shhh"
             return "oneFingerUp"
 
@@ -370,12 +422,7 @@ class GestureState:
         if h["curledCount"] == 0:
             return "handStretchedOut"
 
-        # hands are up but not making a specific shape - still allow a
-        # strong side-eye read to win over an ambiguous hand pose.
-        if face_is_fresh and abs(self.last_face[3]) > SIDE_EYE_YAW_DEG:
-            return "sideEyeCat"
-
-        return "default"
+        return None
 
 
 def load_memes():
@@ -394,9 +441,86 @@ def load_memes():
     return cache
 
 
-def draw_debug_hud(frame, state, gesture):
+class MemeSelector:
+    """Decides which meme is on screen, given a stream of per-frame guesses.
+
+    Three guards. The first two apply to ordinary switches:
+      - a new gesture must repeat STABLE_FRAMES_REQUIRED times in a row
+        before it can become a candidate to switch to
+      - whatever is showing stays for at least min_hold_ms before it can
+        be replaced
+    The third is a separate escape hatch, not a further link in that chain:
+    it watches for a "confident reading" -- any gesture (including
+    "default") reaching STABLE_FRAMES_REQUIRED in a row. If too much time
+    (DEFAULT_FALLBACK_MS) passes without one -- e.g. the classifier is
+    oscillating between two readings and neither ever gets stable -- it
+    reverts to "default" regardless of the minimum hold, since a stale
+    gesture is worse than the honest "nothing is confident" state.
+    """
+
+    def __init__(self, memes, rng=random, min_hold_ms=MIN_HOLD_MS, now=None):
+        self.memes = memes
+        self.rng = rng
+        self.min_hold_ms = min_hold_ms
+        self.current_gesture = "default"
+        self.current_meme = self._pick("default")
+        self.candidate_gesture = "default"
+        self.candidate_streak = 0
+        now = time.time() * 1000 if now is None else now
+        # backdated so the min-hold guard doesn't block the very first
+        # switch away from the initial default (nothing has actually been
+        # held yet at construction time)
+        self.switched_at = now - min_hold_ms
+        self.last_confident_at = now
+
+    def _pick(self, gesture):
+        if gesture in VIDEO_GESTURES:
+            return None
+        return self.rng.choice(self.memes[gesture])
+
+    def _switch(self, gesture, now):
+        self.current_gesture = gesture
+        self.current_meme = self._pick(gesture)
+        self.switched_at = now
+
+    def _revert_to_default(self):
+        # An emergency correction, not a deliberate switch: it does not
+        # touch switched_at, so it does not force whatever gesture regains
+        # confidence next to wait out a fresh min-hold window just because
+        # "default" flashed on screen in between.
+        self.current_gesture = "default"
+        self.current_meme = self._pick("default")
+
+    def update(self, gesture, now):
+        if gesture == self.candidate_gesture:
+            self.candidate_streak += 1
+        else:
+            self.candidate_gesture = gesture
+            self.candidate_streak = 1
+
+        stable = self.candidate_streak >= STABLE_FRAMES_REQUIRED
+        held_long_enough = now - self.switched_at >= self.min_hold_ms
+
+        if stable:
+            # a confident reading -- any gesture, including "default" --
+            # resets the no-agreement clock that drives the fallback below
+            self.last_confident_at = now
+
+        if stable and held_long_enough and gesture != self.current_gesture:
+            self._switch(gesture, now)
+
+        if (
+            now - self.last_confident_at > DEFAULT_FALLBACK_MS
+            and self.current_gesture != "default"
+        ):
+            self._revert_to_default()
+
+        return self.current_gesture
+
+
+def draw_debug_hud(frame, state, gesture, candidate=None, streak=0):
     lines = [
-        f"gesture: {gesture}",
+        f"gesture: {gesture}   candidate: {candidate} x{streak}",
         f"yaw: {state.last_yaw_debug:+.1f} deg  (side-eye thr +/-{SIDE_EYE_YAW_DEG:.1f})",
         f"flow mag: {state.last_flow_magnitude_debug:.2f}  (thr {SPIN_MAG_THRESHOLD:.2f})",
         f"spin fraction (2.2s window): {state.last_flow_fraction_debug:.2f}  (thr {SPIN_FRACTION_REQUIRED:.2f})",
@@ -471,11 +595,9 @@ def main():
     cv2.moveWindow("Meme", 720, 80)
 
     state = GestureState()
-    current_gesture = "default"
-    candidate_gesture = "default"
-    candidate_streak = 0
-    last_non_default_at = time.time() * 1000
-    current_meme = random.choice(memes["default"])
+    selector = MemeSelector(memes)
+    current_gesture = selector.current_gesture
+    current_meme = selector.current_meme
     prev_flow_gray = None
 
     start_time = time.time()
@@ -485,9 +607,10 @@ def main():
             if not ok:
                 break
             frame = cv2.flip(frame, 1)  # mirror, like a selfie cam
+            now_ms = time.time() * 1000
 
             magnitude, coherence, prev_flow_gray = frame_flow_signal(frame, prev_flow_gray)
-            state.update_flow(magnitude, coherence)
+            state.update_flow(magnitude, coherence, now=now_ms)
             flow_log.write(
                 f"{time.time() * 1000:.0f},{magnitude:.4f},{coherence:.4f},"
                 f"{state.last_flow_score_debug:.4f},{state.last_flow_fraction_debug:.4f},"
@@ -500,39 +623,30 @@ def main():
 
             hand_result = hand_landmarker.detect_for_video(mp_image, ts_ms)
             face_result = face_landmarker.detect_for_video(mp_image, ts_ms)
-            state.update_face(face_result)
+            state.update_face(face_result, now=now_ms)
 
-            gesture = state.decide(hand_result)
+            gesture = state.decide(hand_result, now=now_ms)
 
-            now = time.time() * 1000
-            if gesture == candidate_gesture:
-                candidate_streak += 1
-            else:
-                candidate_gesture = gesture
-                candidate_streak = 1
-
-            if candidate_streak >= STABLE_FRAMES_REQUIRED and gesture != current_gesture:
-                current_gesture = gesture
-                if gesture not in VIDEO_GESTURES:
-                    current_meme = random.choice(memes[gesture])
-                elif gesture == "spinCat":
-                    spin_video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-            if gesture != "default":
-                last_non_default_at = now
-            elif now - last_non_default_at > DEFAULT_FALLBACK_MS and current_gesture != "default":
-                current_gesture = "default"
-                current_meme = random.choice(memes["default"])
+            previous_gesture = selector.current_gesture
+            current_gesture = selector.update(gesture, now_ms)
+            if current_gesture == "spinCat" and previous_gesture != "spinCat":
+                spin_video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            current_meme = selector.current_meme
 
             draw_landmarks(frame, hand_result)
-            draw_debug_hud(frame, state, current_gesture)
+            draw_debug_hud(
+                frame, state, current_gesture, selector.candidate_gesture, selector.candidate_streak
+            )
 
             if current_gesture == "spinCat":
                 vframe = next_spin_frame()
+                # current_meme is None for video gestures; if even the
+                # rewind-and-retry in next_spin_frame() came up empty, fall
+                # back to a default still rather than rendering None.
                 meme_view = (
                     fit_to_height(vframe, frame.shape[0])
                     if vframe is not None
-                    else fit_to_height(current_meme, frame.shape[0])
+                    else fit_to_height(memes["default"][0], frame.shape[0])
                 )
             else:
                 meme_view = fit_to_height(current_meme, frame.shape[0])

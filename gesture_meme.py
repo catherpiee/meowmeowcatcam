@@ -10,7 +10,9 @@ Gestures:
   default (no hand) -> memes/pokercat.jpg
   one finger up     -> memes/profcat.jpg, memes/professorcat.jpg
   fist / punch      -> memes/punchcat.jpg
+  thumbs up (fist with thumb sticking out)         -> memes/thumbs up cat.jpg
   shhh              -> memes/shhcat.jpg
+  thinking (index finger propped near the chin)    -> memes/thinking cat.jpg
   two fingers together (both hands, tips touching) -> memes/uwucat.jpg, memes/uwucatt.jpg,
                                                         memes/fingers together muehehe .jpg
   hand covering face -> memes/hand cover face .jpg
@@ -19,6 +21,13 @@ Gestures:
   hand stretched out, palm facing camera (open hand)       -> memes/hand stretched out, palm facing up .jpg
   side eye (head turned to the side)                       -> memes/side eye cat.jpg
   spin cat (spinning fast in your chair)                   -> memes/spin cat.mov (plays as a video)
+
+  finger counting (one hand, held away from your face/chin):
+    two fingers up (index + middle)             -> memes/shocked cat.jpg
+    three fingers up (index + middle + ring)     -> memes/scratch sniff cat.jpg
+    four fingers up, thumb tucked in             -> memes/tongue out cat.jpg
+  (one finger up already meant "professor" - memes/profcat.jpg / professorcat.jpg -
+   memes/beluga smile cat.jpg was added to that same rotation)
 
 The Camera window shows a live debug readout (head yaw, and optical-flow
 magnitude/coherence, vs. their trigger thresholds) in the top-left corner so
@@ -52,9 +61,14 @@ MEMES = ROOT / "memes"
 GESTURE_MEMES = {
     "rockstar": ["cat.jpg"],
     "default": ["pokercat.jpg"],
-    "oneFingerUp": ["profcat.jpg", "professorcat.jpg"],
+    "oneFingerUp": ["profcat.jpg", "professorcat.jpg", "beluga smile cat.jpg"],
     "fist": ["punchcat.jpg"],
+    "thumbsUp": ["thumbs up cat.jpg"],
     "shhh": ["shhcat.jpg"],
+    "thinkingCat": ["thinking cat.jpg"],
+    "twoFingerCount": ["shocked cat.jpg"],
+    "threeFingerCount": ["scratch sniff cat.jpg"],
+    "fourFingerCount": ["tongue out cat.jpg"],
     "twoFingersTogether": ["uwucat.jpg", "uwucatt.jpg", "fingers together muehehe .jpg"],
     "handCoverFace": ["hand cover face .jpg"],
     "crashOutCat": ["crashout cat .jpg"],
@@ -121,6 +135,13 @@ SPIN_FLOW_PEAK_HOLD_MS = 2000
 # near the face).
 HAND_COVER_FACE_DIST_FACE_LOST = 1.3
 HAND_COVER_FACE_DIST_FACE_SEEN = 0.7
+
+# thinking pose: index fingertip propped near the chin/jaw rather than
+# resting on the lips (that's shhh instead). "Chin" isn't a landmark
+# MediaPipe gives us directly, so it's approximated as a point straight
+# below the mouth center, offset by a fraction of the face width.
+THINKING_CHIN_OFFSET = 0.6  # how far below the mouth the approximated chin point sits (x face width)
+THINKING_CHIN_DIST = 0.6  # how close the index fingertip must be to that point
 
 HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -333,21 +354,44 @@ class GestureState:
         h = hands[0]
 
         if h["curledCount"] == 4:
+            # thumbs up: same closed-fist shape as "fist", but the thumb is
+            # sticking out rather than tucked in - reuse the thumbOut
+            # spread check already computed for the rockstar pose.
+            if h["thumbOut"]:
+                return "thumbsUp"
             return "fist"
 
         if h["thumbOut"] and h["pinkyUp"] and not h["indexUp"] and not h["middleUp"] and not h["ringUp"]:
             return "rockstar"
 
-        # shhh / one-finger-up: a single extended index finger is a very
-        # specific shape (shhh in particular = fingertip right on the
-        # mouth), so it must be checked before the broader hand-covering-
-        # face test below - otherwise a shhh pose (finger near the mouth)
-        # gets swallowed by the "any hand near the face" check.
+        # finger counting: how many fingers besides the thumb are held up,
+        # checked from most (4) to least specific so a 4-finger pose can't
+        # get caught by the 2/3-finger checks below it.
+        if h["indexUp"] and h["middleUp"] and h["ringUp"] and h["pinkyUp"] and not h["thumbOut"]:
+            return "fourFingerCount"
+
+        if h["indexUp"] and h["middleUp"] and h["ringUp"] and not h["pinkyUp"]:
+            return "threeFingerCount"
+
+        if h["indexUp"] and h["middleUp"] and not h["ringUp"] and not h["pinkyUp"]:
+            return "twoFingerCount"
+
+        # shhh / thinking / one-finger-up: a single extended index finger is
+        # a very specific shape, so all three must be checked before the
+        # broader hand-covering-face test below - otherwise a shhh/thinking
+        # pose (finger near the face) gets swallowed by the "any hand near
+        # the face" check. Thinking (finger near the chin) is checked before
+        # shhh (finger on the lips) since the chin point sits further from
+        # the mouth and won't accidentally match a real shhh pose.
         if h["indexUp"] and not h["middleUp"] and not h["ringUp"] and not h["pinkyUp"]:
             if face_is_fresh:
                 mouth_center, face_width, _, _, _ = self.last_face
-                d = dist(h["indexTip"], mouth_center) / face_width
-                if d < 0.55:
+                chin_point = mouth_center + np.array([0.0, face_width * THINKING_CHIN_OFFSET, 0.0])
+                d_chin = dist(h["indexTip"], chin_point) / face_width
+                if d_chin < THINKING_CHIN_DIST:
+                    return "thinkingCat"
+                d_mouth = dist(h["indexTip"], mouth_center) / face_width
+                if d_mouth < 0.55:
                     return "shhh"
             return "oneFingerUp"
 
@@ -366,7 +410,8 @@ class GestureState:
             if d < threshold:
                 return "handCoverFace"
 
-        # open palm held out, not near the face
+        # open palm held out, not near the face (thumb spread out too -
+        # a tucked-thumb four-finger pose was already claimed above)
         if h["curledCount"] == 0:
             return "handStretchedOut"
 

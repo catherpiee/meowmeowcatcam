@@ -18,12 +18,13 @@ Checked in this order — when a pose could match more than one, the earlier one
 | 4 | I will punch you | One hand, all four fingers curled |
 | 5 | EHHEHEEEHEEEE | Thumb + pinky out, rockstar cat |
 | 6 | Shhh silenced cat | Index finger only, tip resting on your mouth |
-| 7 | Erm ackshuALLY! cat | Index finger only, held away from your face |
-| 8 | Shocked/kidnapped cat | Hand cover mouth |
-| 9 | gGIMME MONIE!! | One open palm, all fingers extended, away from your face |
-| 10 | Side eye cat | Turn your head 15°+ either way (real head-pose yaw) |
-| 11 | Pokercat | Default |
-| 12 | Spinny OIIAI cat | You spin!!!! |
+| 7 | Laugh and point cat | Index finger only, with open mouth |
+| 8 | Erm ackshuALLY! cat | Index finger only, held away from your face |
+| 9 | Shocked/kidnapped cat | Hand cover mouth |
+| 10 | gGIMME MONIE!! | One open palm, all fingers extended, away from your face |
+| 11 | Side eye cat | Turn your head 15°+ either way (real head-pose yaw) |
+| 12 | Pokercat | Default |
+| 13 | Spinny OIIAI cat | You spin!!!! |
 
 
 Meme images live in `memes/`. A couple of gestures pick randomly between multiple images.

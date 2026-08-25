@@ -53,6 +53,7 @@ GESTURE_MEMES = {
     "rockstar": ["cat.jpg"],
     "default": ["pokercat.jpg"],
     "oneFingerUp": ["profcat.jpg", "professorcat.jpg"],
+    "laughAndPoint": ["laugh and point .jpg"],
     "fist": ["punchcat.jpg"],
     "shhh": ["shhcat.jpg"],
     "twoFingersTogether": ["uwucat.jpg", "uwucatt.jpg", "fingers together muehehe .jpg"],
@@ -121,6 +122,11 @@ SPIN_FLOW_PEAK_HOLD_MS = 2000
 # near the face).
 HAND_COVER_FACE_DIST_FACE_LOST = 1.3
 HAND_COVER_FACE_DIST_FACE_SEEN = 0.7
+
+# how far the lips have to part (as a fraction of face width) for a raised
+# index finger to read as laughing-and-pointing rather than a plain point.
+# A relaxed mouth sits near 0.02; a real laugh opens well past 0.12.
+LAUGH_MOUTH_OPEN = 0.12
 
 HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -345,10 +351,12 @@ class GestureState:
         # gets swallowed by the "any hand near the face" check.
         if h["indexUp"] and not h["middleUp"] and not h["ringUp"] and not h["pinkyUp"]:
             if face_is_fresh:
-                mouth_center, face_width, _, _, _ = self.last_face
+                mouth_center, face_width, mouth_open, _, _ = self.last_face
                 d = dist(h["indexTip"], mouth_center) / face_width
                 if d < 0.55:
                     return "shhh"
+                if mouth_open > LAUGH_MOUTH_OPEN:
+                    return "laughAndPoint"
             return "oneFingerUp"
 
         # hand covering face: the one hand we see sits roughly where the

@@ -12,6 +12,7 @@ const GESTURE_MEMES = {
   rockstar: ["memes/cat.jpg"],
   default: ["memes/pokercat.jpg"],
   oneFingerUp: ["memes/profcat.jpg", "memes/professorcat.jpg"],
+  laughAndPoint: ["memes/laugh and point .jpg"],
   fist: ["memes/punchcat.jpg"],
   shhh: ["memes/shhcat.jpg"],
   twoFingersTogether: [
@@ -47,6 +48,11 @@ const SIDE_EYE_YAW_DEG = 15.0;
 // near the face).
 const HAND_COVER_FACE_DIST_FACE_LOST = 1.3;
 const HAND_COVER_FACE_DIST_FACE_SEEN = 0.7;
+
+// how far the lips have to part (as a fraction of face width) for a raised
+// index finger to read as laughing-and-pointing rather than a plain point.
+// A relaxed mouth sits near 0.02; a real laugh opens well past 0.12.
+const LAUGH_MOUTH_OPEN = 0.12;
 
 const video = document.getElementById("video");
 const memeImg = document.getElementById("memeImg");
@@ -272,6 +278,9 @@ function decideGesture(handResult) {
       const d = dist(h.indexTip, lastFace.mouthCenter) / lastFace.faceWidth;
       if (d < 0.55) {
         return "shhh";
+      }
+      if (lastFace.mouthOpen > LAUGH_MOUTH_OPEN) {
+        return "laughAndPoint";
       }
     }
     return "oneFingerUp";

@@ -62,11 +62,22 @@ Then open `http://localhost:8000` and allow camera access. Models load from Goog
 The Camera window always shows a small readout in the top-left corner:
 
 ```
-gesture: sideEyeCat
+gesture: sideEyeCat   candidate: sideEyeCat x5
 yaw: +18.4 deg  (side-eye thr +/-15.0)
 ```
 
+The `gesture` field shows the meme currently on screen (after stability confirmation); `candidate` shows what the classifier is seeing right now, and `streak` counts consecutive frames of that candidate — useful for spotting an unstable pose while tuning.
+
 Useful for tuning the detection thresholds at the top of `gesture_meme.py` / `app.js` if a gesture is triggering too easily or not easily enough for your setup/lighting.
+
+## Running the tests (desktop build)
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite exercises every gesture rule, the priority ordering between rules, the spin-detection window, and meme switching — all against synthetic MediaPipe landmarks, so it runs without a camera. See `docs/manual-test-checklist.md` for the camera-side pass this can't cover.
 
 ## Project layout
 
@@ -78,3 +89,17 @@ memes/            meme images (+ one video, unused for now)
 models/           MediaPipe .task model files used by the desktop version
 requirements.txt  Python dependencies
 ```
+
+## Two stability fixes (desktop build)
+
+- **Deterministic hand selection.** MediaPipe does not guarantee a stable
+  order for `hand_landmarks`, so driving the single-hand rules off `hands[0]`
+  made the chosen meme flip at random when two hands were visible. Hands are
+  now ordered by handedness label first — it stays attached to the same
+  physical hand as it moves, unlike raw x-position — falling back to
+  position only when handedness is missing, and the first hand that forms a
+  real gesture wins.
+- **A minimum hold time** (`MIN_HOLD_MS`), so a brief misclassification
+  can't flash a wrong meme, plus a fallback: if the classifier oscillates
+  between two readings for too long without either one becoming stable, the
+  display reverts to `default` instead of freezing on a stale gesture.

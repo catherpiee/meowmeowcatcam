@@ -12,18 +12,23 @@ Checked in this order — when a pose could match more than one, the earlier one
 
 | # | Gesture | How to trigger |
 |---|---|---|
-| 1 | Muehehe | Both hands up, index fingers only, tips touching |
-| 2 | Devo cat | Both hands up, above the top of your head |
-| 3 | Crash out cord chewing kitty | Both hands up beside your face to hold yummy electrical cable |
-| 4 | I will punch you | One hand, all four fingers curled |
-| 5 | EHHEHEEEHEEEE | Thumb + pinky out, rockstar cat |
-| 6 | Shhh silenced cat | Index finger only, tip resting on your mouth |
-| 7 | Erm ackshuALLY! cat | Index finger only, held away from your face |
-| 8 | Shocked/kidnapped cat | Hand cover mouth |
-| 9 | gGIMME MONIE!! | One open palm, all fingers extended, away from your face |
-| 10 | Side eye cat | Turn your head 15°+ either way (real head-pose yaw) |
-| 11 | Pokercat | Default |
-| 12 | Spinny OIIAI cat | You spin!!!! |
+| 1 | Spinny OIIAI cat | You spin!!!! (beats everything else, hands included) |
+| 2 | Muehehe | Both hands up, index fingers only, tips touching |
+| 3 | Devo cat | Both hands up, above the top of your head |
+| 4 | Crash out cord chewing kitty | Both hands up beside your face to hold yummy electrical cable |
+| 5 | Thumbs up cat | One hand, thumb sticking out, other four fingers curled |
+| 6 | I will punch you | One hand, all four fingers curled, thumb tucked in |
+| 7 | EHHEHEEEHEEEE | Thumb + pinky out, rockstar cat |
+| 8 | Blep cat | One hand, all four fingers up, thumb tucked in ("four" sign) |
+| 9 | Scratch-n-sniff cat | One hand, three fingers up (index + middle + ring) |
+| 10 | Shocked cat | One hand, two fingers up (index + middle, peace sign) |
+| 11 | Thinking cat | Index finger only, tip propped near your chin |
+| 12 | Shhh silenced cat | Index finger only, tip resting on your mouth |
+| 13 | Erm ackshuALLY! cat / beluga smile cat | Index finger only, held away from your face |
+| 14 | Shocked/kidnapped cat | Hand cover mouth |
+| 15 | gGIMME MONIE!! | One open palm, all fingers extended (thumb included), away from your face |
+| 16 | Side eye cat | Turn your head 15°+ either way (real head-pose yaw) |
+| 17 | Pokercat | Default |
 
 
 Meme images live in `memes/`. A couple of gestures pick randomly between multiple images.

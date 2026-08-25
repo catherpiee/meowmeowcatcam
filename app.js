@@ -11,9 +11,14 @@ import {
 const GESTURE_MEMES = {
   rockstar: ["memes/cat.jpg"],
   default: ["memes/pokercat.jpg"],
-  oneFingerUp: ["memes/profcat.jpg", "memes/professorcat.jpg"],
+  oneFingerUp: ["memes/profcat.jpg", "memes/professorcat.jpg", "memes/beluga smile cat.jpg"],
   fist: ["memes/punchcat.jpg"],
+  thumbsUp: ["memes/thumbs up cat.jpg"],
   shhh: ["memes/shhcat.jpg"],
+  thinkingCat: ["memes/thinking cat.jpg"],
+  twoFingerCount: ["memes/shocked cat.jpg"],
+  threeFingerCount: ["memes/scratch sniff cat.jpg"],
+  fourFingerCount: ["memes/tongue out cat.jpg"],
   twoFingersTogether: [
     "memes/uwucat.jpg",
     "memes/uwucatt.jpg",
@@ -47,6 +52,13 @@ const SIDE_EYE_YAW_DEG = 15.0;
 // near the face).
 const HAND_COVER_FACE_DIST_FACE_LOST = 1.3;
 const HAND_COVER_FACE_DIST_FACE_SEEN = 0.7;
+
+// thinking pose: index fingertip propped near the chin/jaw rather than
+// resting on the lips (that's shhh instead). "Chin" isn't a landmark
+// MediaPipe gives us directly, so it's approximated as a point straight
+// below the mouth center, offset by a fraction of the face width.
+const THINKING_CHIN_OFFSET = 0.6; // how far below the mouth the approximated chin point sits (x face width)
+const THINKING_CHIN_DIST = 0.6; // how close the index fingertip must be to that point
 
 const video = document.getElementById("video");
 const memeImg = document.getElementById("memeImg");
@@ -252,8 +264,13 @@ function decideGesture(handResult) {
 
   const h = hands[0];
 
-  // 1. fist / punch: everything curled
+  // 1. fist / punch: everything curled. Thumbs up is the same shape but
+  // with the thumb sticking out instead of tucked in - reuse the
+  // thumbOut spread check already computed for the rockstar pose.
   if (h.curledCount === 4) {
+    if (h.thumbOut) {
+      return "thumbsUp";
+    }
     return "fist";
   }
 
@@ -262,22 +279,46 @@ function decideGesture(handResult) {
     return "rockstar";
   }
 
-  // 3. shhh / one-finger-up: a single extended index finger is a very
-  // specific shape (shhh in particular = fingertip right on the mouth), so
-  // it must be checked before the broader hand-covering-face test below -
-  // otherwise a shhh pose (finger near the mouth) gets swallowed by the
-  // "any hand near the face" check.
+  // 3. finger counting: how many fingers besides the thumb are held up,
+  // checked from most (4) to least specific so a 4-finger pose can't get
+  // caught by the 2/3-finger checks below it.
+  if (h.indexUp && h.middleUp && h.ringUp && h.pinkyUp && !h.thumbOut) {
+    return "fourFingerCount";
+  }
+  if (h.indexUp && h.middleUp && h.ringUp && !h.pinkyUp) {
+    return "threeFingerCount";
+  }
+  if (h.indexUp && h.middleUp && !h.ringUp && !h.pinkyUp) {
+    return "twoFingerCount";
+  }
+
+  // 4. shhh / thinking / one-finger-up: a single extended index finger is a
+  // very specific shape, so all three must be checked before the broader
+  // hand-covering-face test below - otherwise a shhh/thinking pose (finger
+  // near the face) gets swallowed by the "any hand near the face" check.
+  // Thinking (finger near the chin) is checked before shhh (finger on the
+  // lips) since the chin point sits further from the mouth and won't
+  // accidentally match a real shhh pose.
   if (h.indexUp && !h.middleUp && !h.ringUp && !h.pinkyUp) {
     if (faceIsFresh) {
-      const d = dist(h.indexTip, lastFace.mouthCenter) / lastFace.faceWidth;
-      if (d < 0.55) {
+      const chinPoint = {
+        x: lastFace.mouthCenter.x,
+        y: lastFace.mouthCenter.y + lastFace.faceWidth * THINKING_CHIN_OFFSET,
+        z: lastFace.mouthCenter.z,
+      };
+      const dChin = dist(h.indexTip, chinPoint) / lastFace.faceWidth;
+      if (dChin < THINKING_CHIN_DIST) {
+        return "thinkingCat";
+      }
+      const dMouth = dist(h.indexTip, lastFace.mouthCenter) / lastFace.faceWidth;
+      if (dMouth < 0.55) {
         return "shhh";
       }
     }
     return "oneFingerUp";
   }
 
-  // 4. hand covering face: the one hand we see sits roughly where the face
+  // 5. hand covering face: the one hand we see sits roughly where the face
   // last was. Wider tolerance if the face detector has fully lost the face
   // (strong evidence of a real occlusion); tighter if it's still partially
   // tracking through the fingers.
@@ -291,8 +332,9 @@ function decideGesture(handResult) {
     }
   }
 
-  // 5. open palm held out, not near the face: hand stretched out towards
-  // the camera, palm up.
+  // 6. open palm held out, not near the face: hand stretched out towards
+  // the camera, palm up (thumb spread out too - a tucked-thumb four-finger
+  // pose was already claimed above).
   if (h.curledCount === 0) {
     return "handStretchedOut";
   }
